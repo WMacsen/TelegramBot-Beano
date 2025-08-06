@@ -180,10 +180,112 @@ def set_user_points(group_id, user_id, points):
     save_points_data(data)
     print(f"[DEBUG] Set points for user {user_id} in group {group_id} to {points}")
 
-def add_user_points(group_id, user_id, delta):
+async def check_for_punishment(group_id, user_id, context: ContextTypes.DEFAULT_TYPE):
+    punishments_data = load_punishments_data()
+    group_id_str = str(group_id)
+
+    if group_id_str not in punishments_data:
+        return
+
+    group_punishments = punishments_data[group_id_str]
+    user_points = get_user_points(group_id, user_id)
+    triggered_punishments = get_triggered_punishments_for_user(group_id, user_id)
+
+    for punishment in group_punishments:
+        threshold = punishment.get("threshold")
+        message = punishment.get("message")
+
+        if threshold is None or message is None:
+            continue
+
+        if user_points < threshold:
+            if message not in triggered_punishments:
+                # Punish the user
+                user = await context.bot.get_chat_member(group_id, user_id)
+                await context.bot.send_message(
+                    chat_id=group_id,
+                    text=f"🚨 <b>Punishment Issued!</b> 🚨\n{user.user.mention_html()} has fallen below {threshold} points. Punishment: {message}",
+                    parse_mode='HTML'
+                )
+
+                chat = await context.bot.get_chat(group_id)
+                admins = await context.bot.get_chat_administrators(group_id)
+                for admin in admins:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=admin.user.id,
+                            text=f"User @{user.user.username or user.user.full_name} (ID: {user_id}) in group {chat.title} (ID: {group_id}) triggered punishment '{message}' by falling below {threshold} points."
+                        )
+                    except Exception as e:
+                        print(f"Failed to notify admin {admin.user.id} about punishment: {e}")
+
+                add_triggered_punishment_for_user(group_id, user_id, message)
+        else:
+            # If user is above threshold, reset their status for this punishment
+            if message in triggered_punishments:
+                remove_triggered_punishment_for_user(group_id, user_id, message)
+
+async def add_user_points(group_id, user_id, delta, context: ContextTypes.DEFAULT_TYPE):
     points = get_user_points(group_id, user_id) + delta
     set_user_points(group_id, user_id, points)
     print(f"[DEBUG] Added {delta} points for user {user_id} in group {group_id} (new total: {points})")
+    await check_for_punishment(group_id, user_id, context)
+
+# =============================
+# Punishment System Storage & Helpers
+# =============================
+PUNISHMENTS_DATA_FILE = 'punishments.json'
+PUNISHMENT_STATUS_FILE = 'punishment_status.json'
+
+def load_punishments_data():
+    if os.path.exists(PUNISHMENTS_DATA_FILE):
+        with open(PUNISHMENTS_DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_punishments_data(data):
+    with open(PUNISHMENTS_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_punishment_status_data():
+    if os.path.exists(PUNISHMENT_STATUS_FILE):
+        with open(PUNISHMENT_STATUS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_punishment_status_data(data):
+    with open(PUNISHMENT_STATUS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_triggered_punishments_for_user(group_id, user_id) -> list:
+    data = load_punishment_status_data()
+    group_id = str(group_id)
+    user_id = str(user_id)
+    return data.get(group_id, {}).get(user_id, [])
+
+def add_triggered_punishment_for_user(group_id, user_id, punishment_message: str):
+    data = load_punishment_status_data()
+    group_id = str(group_id)
+    user_id = str(user_id)
+    if group_id not in data:
+        data[group_id] = {}
+    if user_id not in data[group_id]:
+        data[group_id][user_id] = []
+
+    if punishment_message not in data[group_id][user_id]:
+        data[group_id][user_id].append(punishment_message)
+        save_punishment_status_data(data)
+        print(f"[DEBUG] Added triggered punishment '{punishment_message}' for user {user_id} in group {group_id}")
+
+def remove_triggered_punishment_for_user(group_id, user_id, punishment_message: str):
+    data = load_punishment_status_data()
+    group_id = str(group_id)
+    user_id = str(user_id)
+    if group_id in data and user_id in data[group_id]:
+        if punishment_message in data[group_id][user_id]:
+            data[group_id][user_id].remove(punishment_message)
+            save_punishment_status_data(data)
+            print(f"[DEBUG] Removed triggered punishment '{punishment_message}' for user {user_id} in group {group_id}")
 
 # =============================
 # Reward System Commands
@@ -295,13 +397,26 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"You do not have enough points for this reward. You have {user_points}, but it costs {reward['cost']}.")
             context.user_data.pop(REWARD_STATE, None)
             return
-        add_user_points(group_id, user_id, -reward['cost'])
-        await update.message.reply_text(f"Congratulations! You bought the reward: <b>{reward['name']}</b> for {reward['cost']} points!", parse_mode='HTML')
+        await add_user_points(group_id, user_id, -reward['cost'], context)
+
+        # Public announcement
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"🎁 <b>{update.effective_user.full_name}</b> just bought the reward: <b>{reward['name']}</b>! 🎉",
             parse_mode='HTML'
         )
+
+        # Private message to admins
+        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin.user.id,
+                    text=f"User @{update.effective_user.username or update.effective_user.full_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) just bought the reward: '{reward['name']}' for {reward['cost']} points."
+                )
+            except Exception as e:
+                print(f"Failed to notify admin {admin.user.id} about reward purchase: {e}")
+
         context.user_data.pop(REWARD_STATE, None)
         return
 
@@ -313,7 +428,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except ValueError:
             await update.message.reply_text("Please reply with a valid integer number of points to add.")
             return
-        add_user_points(state['group_id'], state['target_id'], value)
+        await add_user_points(state['group_id'], state['target_id'], value, context)
         await update.message.reply_text(f"Added {value} points.")
         context.user_data.pop(ADDPOINTS_STATE, None)
         return
@@ -325,7 +440,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         except ValueError:
             await update.message.reply_text("Please reply with a valid integer number of points to remove.")
             return
-        add_user_points(state['group_id'], state['target_id'], -value)
+        await add_user_points(state['group_id'], state['target_id'], -value, context)
         await update.message.reply_text(f"Removed {value} points.")
         context.user_data.pop(REMOVEPOINTS_STATE, None)
         return
@@ -415,6 +530,81 @@ async def addreward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data[ADDREWARD_STATE] = {'group_id': str(update.effective_chat.id)}
     await update.message.reply_text("What is the name of the reward you want to add?")
+
+async def addpunishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /addpunishment <threshold> <message> (admin only): Adds a new punishment.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("Only admins can use this command.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /addpunishment <threshold> <message>")
+        return
+
+    try:
+        threshold = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Threshold must be a number.")
+        return
+
+    message = " ".join(context.args[1:])
+    group_id = str(update.effective_chat.id)
+    punishments_data = load_punishments_data()
+
+    if group_id not in punishments_data:
+        punishments_data[group_id] = []
+
+    # Check for duplicates
+    for p in punishments_data[group_id]:
+        if p["message"].lower() == message.lower():
+            await update.message.reply_text("A punishment with this message already exists.")
+            return
+
+    punishments_data[group_id].append({"threshold": threshold, "message": message})
+    save_punishments_data(punishments_data)
+
+    await update.message.reply_text(f"Punishment added: '{message}' at {threshold} points.")
+
+async def removepunishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /removepunishment <message> (admin only): Removes a punishment.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("Only admins can use this command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /removepunishment <message>")
+        return
+
+    message_to_remove = " ".join(context.args)
+    group_id = str(update.effective_chat.id)
+    punishments_data = load_punishments_data()
+
+    if group_id not in punishments_data:
+        await update.message.reply_text("No punishments found for this group.")
+        return
+
+    initial_len = len(punishments_data[group_id])
+    punishments_data[group_id] = [p for p in punishments_data[group_id] if p["message"].lower() != message_to_remove.lower()]
+
+    if len(punishments_data[group_id]) == initial_len:
+        await update.message.reply_text("Punishment not found.")
+    else:
+        save_punishments_data(punishments_data)
+        await update.message.reply_text("Punishment removed.")
 
 async def removereward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -715,7 +905,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     static_commands = [
         'start', 'help', 'beowned', 'command', 'remove', 'admin', 'inactive',
         'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
-        'point', 'top5'
+        'point', 'top5', 'addpunishment', 'removepunishment'
     ]
     if command in static_commands:
         return
@@ -1049,6 +1239,8 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('inactive', inactive_command))
     app.add_handler(CommandHandler('addreward', addreward_command))
     app.add_handler(CommandHandler('removereward', removereward_command))
+    app.add_handler(CommandHandler('addpunishment', addpunishment_command))
+    app.add_handler(CommandHandler('removepunishment', removepunishment_command))
     app.add_handler(CommandHandler('reward', reward_command))
     app.add_handler(CommandHandler('cancel', cancel_command))
     app.add_handler(CommandHandler('addpoints', addpoints_command))
