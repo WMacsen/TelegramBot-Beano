@@ -208,63 +208,16 @@ async def reward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[REWARD_STATE] = {'group_id': group_id}
     await update.message.reply_text(msg, parse_mode='HTML')
 
-async def reward_choice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if REWARD_STATE not in context.user_data:
-        return
-    state = context.user_data[REWARD_STATE]
-    group_id = state['group_id']
-    user_id = update.effective_user.id
-    choice = update.message.text.strip()
-    rewards = get_rewards_list(group_id)
-    reward = next((r for r in rewards if r['name'].lower() == choice.lower()), None)
-    if not reward:
-        await update.message.reply_text("That reward does not exist. Please reply with a valid reward name or type /cancel.")
-        return
-    if reward['name'].lower() == 'other':
-        await update.message.reply_text("Communicate with either your owner or the beta to discuss what you want your reward to be and what it would cost you.")
-        # Notify admins
-        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-        for admin in admins:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin.user.id,
-                    text=f"User @{update.effective_user.username or ''} (ID: {user_id}) selected the reward 'Other'. Instruct them to discuss their reward and cost with you.",
-                )
-            except Exception:
-                pass
-        context.user_data.pop(REWARD_STATE, None)
-        return
-    # Check points
-    user_points = get_user_points(group_id, user_id)
-    if user_points < reward['cost']:
-        await update.message.reply_text(f"You do not have enough points for this reward. You have {user_points}, but it costs {reward['cost']}.")
-        context.user_data.pop(REWARD_STATE, None)
-        return
-    # Deduct points and announce
-    add_user_points(group_id, user_id, -reward['cost'])
-    await update.message.reply_text(f"Congratulations! You bought the reward: <b>{reward['name']}</b> for {reward['cost']} points!", parse_mode='HTML')
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"🎁 <b>{update.effective_user.full_name}</b> just bought the reward: <b>{reward['name']}</b>! 🎉",
-        parse_mode='HTML'
-    )
-    context.user_data.pop(REWARD_STATE, None)
+async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles all conversation-based interactions after a command has been issued.
+    This acts as a router based on the state stored in context.user_data.
+    """
+    # Update user activity to prevent being kicked for inactivity during a conversation
+    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
+        update_user_activity(update.effective_user.id, update.effective_chat.id)
 
-async def reward_interactive_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    # Add reward name step
-    if ADDREWARD_STATE in context.user_data:
-        state = context.user_data[ADDREWARD_STATE]
-        name = update.message.text.strip()
-        if name.lower() == "other":
-            await update.message.reply_text("You cannot add the reward 'Other'.")
-            context.user_data.pop(ADDREWARD_STATE, None)
-            return
-        state['name'] = name
-        context.user_data[ADDREWARD_COST_STATE] = state
-        context.user_data.pop(ADDREWARD_STATE, None)
-        await update.message.reply_text(f"What is the cost (in points) for the reward '{name}'?")
-        return
-    # Add reward cost step
+    # === Add Reward Flow: Step 2 (Cost) ===
     if ADDREWARD_COST_STATE in context.user_data:
         state = context.user_data[ADDREWARD_COST_STATE]
         try:
@@ -282,7 +235,22 @@ async def reward_interactive_handler(update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"Could not add reward '{name}'. It may already exist or is not allowed.")
         context.user_data.pop(ADDREWARD_COST_STATE, None)
         return
-    # Remove reward step
+
+    # === Add Reward Flow: Step 1 (Name) ===
+    if ADDREWARD_STATE in context.user_data:
+        state = context.user_data[ADDREWARD_STATE]
+        name = update.message.text.strip()
+        if name.lower() == "other":
+            await update.message.reply_text("You cannot add the reward 'Other'.")
+            context.user_data.pop(ADDREWARD_STATE, None)
+            return
+        state['name'] = name
+        context.user_data[ADDREWARD_COST_STATE] = state
+        context.user_data.pop(ADDREWARD_STATE, None)
+        await update.message.reply_text(f"What is the cost (in points) for the reward '{name}'?")
+        return
+
+    # === Remove Reward Flow ===
     if REMOVEREWARD_STATE in context.user_data:
         state = context.user_data[REMOVEREWARD_STATE]
         name = update.message.text.strip()
@@ -297,9 +265,130 @@ async def reward_interactive_handler(update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"Could not remove reward '{name}'. It may not exist or is not allowed.")
         context.user_data.pop(REMOVEREWARD_STATE, None)
         return
-    # Reward choice step
+
+    # === User Reward Choice Flow ===
     if REWARD_STATE in context.user_data:
-        await reward_choice_handler(update, context)
+        state = context.user_data[REWARD_STATE]
+        group_id = state['group_id']
+        user_id = update.effective_user.id
+        choice = update.message.text.strip()
+        rewards = get_rewards_list(group_id)
+        reward = next((r for r in rewards if r['name'].lower() == choice.lower()), None)
+        if not reward:
+            await update.message.reply_text("That reward does not exist. Please reply with a valid reward name or type /cancel.")
+            return
+        if reward['name'].lower() == 'other':
+            await update.message.reply_text("Communicate with either your owner or the beta to discuss what you want your reward to be and what it would cost you.")
+            admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+            for admin in admins:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin.user.id,
+                        text=f"User @{update.effective_user.username or ''} (ID: {user_id}) selected the reward 'Other'. Instruct them to discuss their reward and cost with you.",
+                    )
+                except Exception:
+                    pass
+            context.user_data.pop(REWARD_STATE, None)
+            return
+        user_points = get_user_points(group_id, user_id)
+        if user_points < reward['cost']:
+            await update.message.reply_text(f"You do not have enough points for this reward. You have {user_points}, but it costs {reward['cost']}.")
+            context.user_data.pop(REWARD_STATE, None)
+            return
+        add_user_points(group_id, user_id, -reward['cost'])
+        await update.message.reply_text(f"Congratulations! You bought the reward: <b>{reward['name']}</b> for {reward['cost']} points!", parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"🎁 <b>{update.effective_user.full_name}</b> just bought the reward: <b>{reward['name']}</b>! 🎉",
+            parse_mode='HTML'
+        )
+        context.user_data.pop(REWARD_STATE, None)
+        return
+
+    # === Add/Remove Points Flow ===
+    if ADDPOINTS_STATE in context.user_data:
+        state = context.user_data[ADDPOINTS_STATE]
+        try:
+            value = int(update.message.text.strip())
+        except ValueError:
+            await update.message.reply_text("Please reply with a valid integer number of points to add.")
+            return
+        add_user_points(state['group_id'], state['target_id'], value)
+        await update.message.reply_text(f"Added {value} points.")
+        context.user_data.pop(ADDPOINTS_STATE, None)
+        return
+
+    if REMOVEPOINTS_STATE in context.user_data:
+        state = context.user_data[REMOVEPOINTS_STATE]
+        try:
+            value = int(update.message.text.strip())
+        except ValueError:
+            await update.message.reply_text("Please reply with a valid integer number of points to remove.")
+            return
+        add_user_points(state['group_id'], state['target_id'], -value)
+        await update.message.reply_text(f"Removed {value} points.")
+        context.user_data.pop(REMOVEPOINTS_STATE, None)
+        return
+
+    # === Admin Help Flow ===
+    if ADMIN_HELP_STATE in context.user_data:
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("This command can only be used in group chats.")
+            return
+        message = update.message
+        if not message:
+            return
+        reason = message.text
+        help_data = context.user_data.get('admin_help', {})
+        help_data['reason'] = reason
+        user = message.from_user
+        chat = message.chat
+        replied_message = help_data.get('replied_message')
+        help_text = f"🚨 <b>Admin Help Request</b> 🚨\n" \
+                    f"<b>User:</b> {user.mention_html()} (ID: {user.id})\n" \
+                    f"<b>Group:</b> {getattr(chat, 'title', chat.id)} (ID: {chat.id})\n" \
+                    f"<b>Reason:</b> {reason}\n"
+        if replied_message:
+            rep_user = replied_message.get('from', {})
+            rep_text = replied_message.get('text', '') or replied_message.get('caption', '')
+            has_photo = 'photo' in replied_message and replied_message['photo']
+            has_video = 'video' in replied_message and replied_message['video']
+            has_voice = 'voice' in replied_message and replied_message['voice']
+            if has_photo and not rep_text and not has_video and not has_voice:
+                help_text += f"<b>Replied to:</b> [media: image only]\n"
+            elif has_video and not rep_text and not has_photo and not has_voice:
+                help_text += f"<b>Replied to:</b> [media: video only]\n"
+            elif has_voice and not rep_text and not has_photo and not has_video:
+                help_text += f"<b>Replied to:</b> [media: voice note only]\n"
+            else:
+                help_text += f"<b>Replied to:</b> {rep_user.get('username', 'Unknown')} (ID: {rep_user.get('id', 'N/A')})\n"
+                if rep_text:
+                    help_text += f"<b>Message:</b> {rep_text}\n"
+        admins = await context.bot.get_chat_administrators(chat.id)
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin.user.id,
+                    text=help_text,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                if replied_message:
+                    if 'photo' in replied_message and replied_message['photo']:
+                        file_id = replied_message['photo'][-1]['file_id']
+                        await context.bot.send_photo(chat_id=admin.user.id, photo=file_id, caption="[Forwarded from help request]")
+                    if 'video' in replied_message and replied_message['video']:
+                        file_id = replied_message['video']['file_id']
+                        await context.bot.send_video(chat_id=admin.user.id, video=file_id, caption="[Forwarded from help request]")
+                    if 'voice' in replied_message and replied_message['voice']:
+                        file_id = replied_message['voice']['file_id']
+                        await context.bot.send_voice(chat_id=admin.user.id, voice=file_id, caption="[Forwarded from help request]")
+            except Exception as e:
+                print(f"Failed to notify admin {admin.user.id}: {e}")
+        await message.reply_text("Your help request has been sent to all group admins.")
+        context.user_data.pop(ADMIN_HELP_STATE, None)
+        context.user_data.pop('admin_help', None)
+        return
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -327,39 +416,6 @@ async def addreward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[ADDREWARD_STATE] = {'group_id': str(update.effective_chat.id)}
     await update.message.reply_text("What is the name of the reward you want to add?")
 
-async def addreward_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if ADDREWARD_STATE not in context.user_data:
-        return
-    state = context.user_data[ADDREWARD_STATE]
-    name = update.message.text.strip()
-    if name.lower() == "other":
-        await update.message.reply_text("You cannot add the reward 'Other'.")
-        context.user_data.pop(ADDREWARD_STATE, None)
-        return
-    state['name'] = name
-    context.user_data[ADDREWARD_COST_STATE] = state
-    context.user_data.pop(ADDREWARD_STATE, None)
-    await update.message.reply_text(f"What is the cost (in points) for the reward '{name}'?")
-
-async def addreward_cost_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if ADDREWARD_COST_STATE not in context.user_data:
-        return
-    state = context.user_data[ADDREWARD_COST_STATE]
-    try:
-        cost = int(update.message.text.strip())
-        if cost < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Please reply with a valid positive integer for the cost.")
-        return
-    group_id = state['group_id']
-    name = state['name']
-    if add_reward(group_id, name, cost):
-        await update.message.reply_text(f"Reward '{name}' added with cost {cost} points.")
-    else:
-        await update.message.reply_text(f"Could not add reward '{name}'. It may already exist or is not allowed.")
-    context.user_data.pop(ADDREWARD_COST_STATE, None)
-
 async def removereward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removereward (admin only): Start remove reward process
@@ -372,22 +428,6 @@ async def removereward_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     context.user_data[REMOVEREWARD_STATE] = {'group_id': str(update.effective_chat.id)}
     await update.message.reply_text("What is the name of the reward you want to remove?")
-
-async def removereward_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if REMOVEREWARD_STATE not in context.user_data:
-        return
-    state = context.user_data[REMOVEREWARD_STATE]
-    name = update.message.text.strip()
-    if name.lower() == "other":
-        await update.message.reply_text("You cannot remove the reward 'Other'.")
-        context.user_data.pop(REMOVEREWARD_STATE, None)
-        return
-    group_id = state['group_id']
-    if remove_reward(group_id, name):
-        await update.message.reply_text(f"Reward '{name}' removed.")
-    else:
-        await update.message.reply_text(f"Could not remove reward '{name}'. It may not exist or is not allowed.")
-    context.user_data.pop(REMOVEREWARD_STATE, None)
 
 async def addpoints_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -460,32 +500,6 @@ async def removepoints_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     context.user_data[REMOVEPOINTS_STATE] = {'group_id': group_id, 'target_id': target_id}
     await update.message.reply_text(f"How many points do you want to remove from this user?")
-
-async def addpoints_value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if ADDPOINTS_STATE not in context.user_data:
-        return
-    state = context.user_data[ADDPOINTS_STATE]
-    try:
-        value = int(update.message.text.strip())
-    except Exception:
-        await update.message.reply_text("Please reply with a valid integer number of points to add.")
-        return
-    add_user_points(state['group_id'], state['target_id'], value)
-    await update.message.reply_text(f"Added {value} points.")
-    context.user_data.pop(ADDPOINTS_STATE, None)
-
-async def removepoints_value_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if REMOVEPOINTS_STATE not in context.user_data:
-        return
-    state = context.user_data[REMOVEPOINTS_STATE]
-    try:
-        value = int(update.message.text.strip())
-    except Exception:
-        await update.message.reply_text("Please reply with a valid integer number of points to remove.")
-        return
-    add_user_points(state['group_id'], state['target_id'], -value)
-    await update.message.reply_text(f"Removed {value} points.")
-    context.user_data.pop(REMOVEPOINTS_STATE, None)
 
 async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -696,6 +710,16 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
         print("[DEBUG] No message or text in dynamic_hashtag_command.")
         return
     command = update.message.text[1:].split()[0].lower()  # Remove leading /
+
+    # Prevent this handler from hijacking static commands
+    static_commands = [
+        'start', 'help', 'beowned', 'command', 'remove', 'admin', 'inactive',
+        'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
+        'point', 'top5'
+    ]
+    if command in static_commands:
+        return
+
     data = load_hashtag_data()
     if command not in data:
         await update.message.reply_text(f"No data found for #{command}.")
@@ -857,94 +881,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text("Please describe the reason you need admin help. Your request will be sent to all group admins.")
     context.user_data[ADMIN_HELP_STATE] = True
 
-# Handler for collecting the reason after /admin
-async def admin_help_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Update user activity for inactivity tracking
-    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
-    if update.effective_chat.type == "private":
-        await update.message.reply_text("This command can only be used in group chats.")
-        return
-    if not context.user_data.get(ADMIN_HELP_STATE):
-        return  # Not in admin help state
-    message = update.message
-    if not message:
-        return
-    reason = message.text
-    help_data = context.user_data.get('admin_help', {})
-    help_data['reason'] = reason
-    # Prepare message for admins
-    user = message.from_user
-    chat = message.chat
-    replied_message = help_data.get('replied_message')
-    help_text = f"🚨 <b>Admin Help Request</b> 🚨\n" \
-                f"<b>User:</b> {user.mention_html()} (ID: {user.id})\n" \
-                f"<b>Group:</b> {getattr(chat, 'title', chat.id)} (ID: {chat.id})\n" \
-                f"<b>Reason:</b> {reason}\n"
-    if replied_message:
-        # Include replied message text if available
-        rep_user = replied_message.get('from', {})
-        rep_text = replied_message.get('text', '') or replied_message.get('caption', '')
-        has_photo = 'photo' in replied_message and replied_message['photo']
-        has_video = 'video' in replied_message and replied_message['video']
-        has_voice = 'voice' in replied_message and replied_message['voice']
-        # Only image
-        if has_photo and not rep_text and not has_video and not has_voice:
-            help_text += f"<b>Replied to:</b> [media: image only]\n"
-        # Only video
-        elif has_video and not rep_text and not has_photo and not has_voice:
-            help_text += f"<b>Replied to:</b> [media: video only]\n"
-        # Only voice note
-        elif has_voice and not rep_text and not has_photo and not has_video:
-            help_text += f"<b>Replied to:</b> [media: voice note only]\n"
-        else:
-            help_text += f"<b>Replied to:</b> {rep_user.get('username', 'Unknown')} (ID: {rep_user.get('id', 'N/A')})\n"
-            if rep_text:
-                help_text += f"<b>Message:</b> {rep_text}\n"
-    # Send to all group admins
-    admins = await context.bot.get_chat_administrators(chat.id)
-    for admin in admins:
-        try:
-            # Send the help text
-            await context.bot.send_message(
-                chat_id=admin.user.id,
-                text=help_text,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            # If replied message has media, forward it
-            if replied_message:
-                # Photo
-                if 'photo' in replied_message and replied_message['photo']:
-                    # Get the largest photo (last in the list)
-                    file_id = replied_message['photo'][-1]['file_id']
-                    await context.bot.send_photo(
-                        chat_id=admin.user.id,
-                        photo=file_id,
-                        caption="[Forwarded from help request]"
-                    )
-                # Video
-                if 'video' in replied_message and replied_message['video']:
-                    file_id = replied_message['video']['file_id']
-                    await context.bot.send_video(
-                        chat_id=admin.user.id,
-                        video=file_id,
-                        caption="[Forwarded from help request]"
-                    )
-                # Voice note
-                if 'voice' in replied_message and replied_message['voice']:
-                    file_id = replied_message['voice']['file_id']
-                    await context.bot.send_voice(
-                        chat_id=admin.user.id,
-                        voice=file_id,
-                        caption="[Forwarded from help request]"
-                    )
-        except Exception as e:
-            print(f"Failed to notify admin {admin.user.id}: {e}")
-    await message.reply_text("Your help request has been sent to all group admins.")
-    context.user_data.pop(ADMIN_HELP_STATE, None)
-    context.user_data.pop('admin_help', None)
-
 #Start command
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
@@ -1019,24 +955,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = handle_response(update.message.text)
         if response:
             await update.message.reply_text(response)
-
-def main():
-    if not TOKEN:
-        print("Error: TELEGRAM_TOKEN environment variable is not set.")
-        exit(1)
-    application = Application.builder().token(TOKEN).build()
-
-    application.add_handler(CommandHandler('start', start_command))
-    application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('beowned', beowned_command))
-    application.add_handler(CommandHandler('command', command_list_command))
-    application.add_handler(CommandHandler('remove', remove_command))
-    application.add_handler(CommandHandler('admin', admin_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_help_reason_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
-    application.add_handler(MessageHandler(filters.COMMAND, dynamic_hashtag_command))
-    application.add_error_handler(error)
 
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f'Update {update} caused error {context.error}')
@@ -1137,13 +1055,10 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('removepoints', removepoints_command))
     app.add_handler(CommandHandler('point', point_command))
     app.add_handler(CommandHandler('top5', top5_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, addreward_name_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, addreward_cost_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, removereward_name_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reward_choice_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, addpoints_value_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, removepoints_value_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_help_reason_handler))
+
+    # Add the conversation handler with a high priority
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_handler), group=-1)
+
     app.add_handler(MessageHandler(filters.COMMAND, dynamic_hashtag_command))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
