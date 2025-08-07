@@ -4,6 +4,7 @@
 import os
 import json
 import re
+import random
 from typing import Final
 import uuid
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
@@ -233,6 +234,55 @@ async def add_user_points(group_id, user_id, delta, context: ContextTypes.DEFAUL
     await check_for_punishment(group_id, user_id, context)
 
 # =============================
+# Chance Game Helpers
+# =============================
+CHANCE_COOLDOWNS_FILE = 'chance_cooldowns.json'
+
+def load_cooldowns():
+    if os.path.exists(CHANCE_COOLDOWNS_FILE):
+        with open(CHANCE_COOLDOWNS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_cooldowns(data):
+    with open(CHANCE_COOLDOWNS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_last_played(user_id):
+    cooldowns = load_cooldowns()
+    return cooldowns.get(str(user_id))
+
+def set_last_played(user_id):
+    cooldowns = load_cooldowns()
+    cooldowns[str(user_id)] = time.time()
+    save_cooldowns(cooldowns)
+
+def get_chance_outcome():
+    """
+    Returns a random outcome for the chance game based on weighted probabilities.
+    """
+    outcomes = [
+        {"name": "plus_50", "weight": 15},
+        {"name": "minus_100", "weight": 15},
+        {"name": "chastity_2_days", "weight": 15},
+        {"name": "chastity_7_days", "weight": 5},
+        {"name": "nothing", "weight": 30},
+        {"name": "free_reward", "weight": 10},
+        {"name": "lose_all_points", "weight": 2.5},
+        {"name": "double_points", "weight": 2.5},
+        {"name": "ask_task", "weight": 5},
+    ]
+
+    total_weight = sum(o['weight'] for o in outcomes)
+    random_num = random.uniform(0, total_weight)
+
+    current_weight = 0
+    for outcome in outcomes:
+        current_weight += outcome['weight']
+        if random_num <= current_weight:
+            return outcome['name']
+
+# =============================
 # Game System Storage & Helpers
 # =============================
 GAMES_DATA_FILE = 'games.json'
@@ -459,6 +509,66 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await add_user_points(state['group_id'], state['target_id'], -value, context)
         await update.message.reply_text(f"Removed {value} points.")
         context.user_data.pop(REMOVEPOINTS_STATE, None)
+        return
+
+    # === Free Reward Flow ===
+    if FREE_REWARD_SELECTION in context.user_data:
+        state = context.user_data[FREE_REWARD_SELECTION]
+        group_id = state['group_id']
+        user_id = update.effective_user.id
+        choice = update.message.text.strip()
+        rewards = get_rewards_list(group_id)
+        reward = next((r for r in rewards if r['name'].lower() == choice.lower()), None)
+
+        if not reward:
+            await update.message.reply_text("That reward does not exist. Please reply with a valid reward name.")
+            return
+
+        await update.message.reply_text(f"Congratulations! You have claimed your free reward: <b>{reward['name']}</b>!", parse_mode='HTML')
+
+        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin.user.id,
+                    text=f"User @{update.effective_user.username or update.effective_user.full_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) claimed the free reward: '{reward['name']}'."
+                )
+            except Exception as e:
+                print(f"Failed to notify admin {admin.user.id} about free reward: {e}")
+
+        context.user_data.pop(FREE_REWARD_SELECTION, None)
+        return
+
+    # === Ask Task Flow ===
+    if ASK_TASK_TARGET in context.user_data:
+        state = context.user_data[ASK_TASK_TARGET]
+        username = update.message.text.strip()
+        if not username.startswith('@'):
+            await update.message.reply_text("Please provide a valid @username.")
+            return
+
+        state['target_username'] = username
+        context.user_data[ASK_TASK_DESCRIPTION] = state
+        context.user_data.pop(ASK_TASK_TARGET, None)
+        await update.message.reply_text("What is the simple task you want to ask of them?")
+        return
+
+    if ASK_TASK_DESCRIPTION in context.user_data:
+        state = context.user_data[ASK_TASK_DESCRIPTION]
+        task_description = update.message.text.strip()
+        group_id = state['group_id']
+        challenger = update.effective_user
+        target_username = state['target_username']
+
+        # Announce in group
+        await context.bot.send_message(
+            chat_id=group_id,
+            text=f"{challenger.mention_html()} has a task for {target_username}: {task_description}",
+            parse_mode='HTML'
+        )
+
+        await update.message.reply_text("Your task has been assigned.")
+        context.user_data.pop(ASK_TASK_DESCRIPTION, None)
         return
 
     # === Admin Help Flow ===
@@ -731,6 +841,60 @@ async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     game['status'] = 'complete'
     save_games_data(games_data)
+
+async def chance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /chance (once per day): Play a game of chance for a random outcome.
+    """
+    user_id = update.effective_user.id
+    last_played = get_last_played(user_id)
+
+    if last_played and (time.time() - last_played) < 86400: # 24 hours
+        remaining_time = 86400 - (time.time() - last_played)
+        hours = int(remaining_time // 3600)
+        minutes = int((remaining_time % 3600) // 60)
+        await update.message.reply_text(f"You have already played today. Please wait {hours}h {minutes}m to play again.")
+        return
+
+    await update.message.reply_text("You spin the wheel of fortune...")
+    outcome = get_chance_outcome()
+
+    group_id = str(update.effective_chat.id)
+
+    if outcome == "plus_50":
+        await add_user_points(group_id, user_id, 50, context)
+        await update.message.reply_text("Congratulations! You won 50 points!")
+    elif outcome == "minus_100":
+        await add_user_points(group_id, user_id, -100, context)
+        await update.message.reply_text("Ouch! You lost 100 points.")
+    elif outcome == "chastity_2_days":
+        await update.message.reply_text("Your fate is 2 days of chastity!")
+    elif outcome == "chastity_7_days":
+        await update.message.reply_text("Your fate is 7 days of chastity! Good luck.")
+    elif outcome == "nothing":
+        await update.message.reply_text("Nothing happened. Better luck next time!")
+    elif outcome == "lose_all_points":
+        points = get_user_points(group_id, user_id)
+        await add_user_points(group_id, user_id, -points, context)
+        await update.message.reply_text("Catastrophic failure! You lost all your points.")
+    elif outcome == "double_points":
+        points = get_user_points(group_id, user_id)
+        await add_user_points(group_id, user_id, points, context)
+        await update.message.reply_text("Jackpot! Your points have been doubled!")
+
+    elif outcome == "free_reward":
+        rewards = get_rewards_list(group_id)
+        msg = "<b>You won a free reward!</b>\nChoose one of the following:\n"
+        for r in rewards:
+            msg += f"• <b>{r['name']}</b>\n"
+        msg += "\nReply with the name of the reward you want."
+        context.user_data[FREE_REWARD_SELECTION] = {'group_id': group_id}
+        await update.message.reply_text(msg, parse_mode='HTML')
+    elif outcome == "ask_task":
+        await update.message.reply_text("You have won the right to ask a simple task from any of the other boys. Who would you like to ask? (Please provide their @username)")
+        context.user_data[ASK_TASK_TARGET] = {'group_id': group_id}
+
+    set_last_played(user_id)
 
 async def cleangames_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1072,7 +1236,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
         'start', 'help', 'beowned', 'command', 'remove', 'admin', 'inactive',
         'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
         'point', 'top5', 'addpunishment', 'removepunishment', 'punishment', 'newgame',
-        'loser', 'cleangames'
+        'loser', 'cleangames', 'chance'
     ]
     if command in static_commands:
         return
@@ -1322,7 +1486,7 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================
 # Game Setup Conversation
 # =============================
-GAME_SELECTION, STAKE_TYPE_SELECTION, STAKE_SUBMISSION_POINTS, STAKE_SUBMISSION_MEDIA, OPPONENT_SELECTION, CONFIRMATION = range(6)
+GAME_SELECTION, STAKE_TYPE_SELECTION, STAKE_SUBMISSION_POINTS, STAKE_SUBMISSION_MEDIA, OPPONENT_SELECTION, CONFIRMATION, FREE_REWARD_SELECTION, ASK_TASK_TARGET, ASK_TASK_DESCRIPTION = range(9)
 
 async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the game setup conversation."""
@@ -1749,6 +1913,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('newgame', newgame_command))
     app.add_handler(CommandHandler('loser', loser_command))
     app.add_handler(CommandHandler('cleangames', cleangames_command))
+    app.add_handler(CommandHandler('chance', chance_command))
     app.add_handler(CommandHandler('reward', reward_command))
     app.add_handler(CommandHandler('cancel', cancel_command))
     app.add_handler(CommandHandler('addpoints', addpoints_command))
