@@ -362,6 +362,17 @@ async def add_user_points(group_id, user_id, delta, context: ContextTypes.DEFAUL
     set_user_points(group_id, user_id, points)
     logger.debug(f"Added {delta} points for user {user_id} in group {group_id} (new total: {points})")
 
+    # If user's points are non-negative, reset their negative strike counter for this group.
+    if points >= 0:
+        tracker = load_negative_tracker()
+        group_id_str = str(group_id)
+        user_id_str = str(user_id)
+        if group_id_str in tracker and user_id_str in tracker.get(group_id_str, {}):
+            if tracker[group_id_str][user_id_str] != 0:
+                tracker[group_id_str][user_id_str] = 0
+                save_negative_tracker(tracker)
+                logger.debug(f"Reset negative points tracker for user {user_id_str} in group {group_id_str}.")
+
     # Run all punishment checks
     await check_for_punishment(group_id, user_id, context)
     await check_for_negative_points(group_id, user_id, points, context)
@@ -384,44 +395,54 @@ def save_negative_tracker(data):
 async def check_for_negative_points(group_id, user_id, points, context: ContextTypes.DEFAULT_TYPE):
     if points < 0:
         tracker = load_negative_tracker()
+        group_id_str = str(group_id)
         user_id_str = str(user_id)
 
-        tracker[user_id_str] = tracker.get(user_id_str, 0) + 1
+        if group_id_str not in tracker:
+            tracker[group_id_str] = {}
+
+        current_strikes = tracker.get(group_id_str, {}).get(user_id_str, 0)
+        current_strikes += 1
+        tracker[group_id_str][user_id_str] = current_strikes
         save_negative_tracker(tracker)
 
-        count = tracker[user_id_str]
         user_member = await context.bot.get_chat_member(group_id, user_id)
         user_mention = user_member.user.mention_html()
 
-        if count < 3:
+        if current_strikes < 3:
+            # On the first and second strike, mute for 24h and reset points.
             try:
                 await context.bot.restrict_chat_member(
                     chat_id=group_id,
                     user_id=user_id,
                     permissions={'can_send_messages': False},
-                    until_date=time.time() + 86400
+                    until_date=time.time() + 86400  # 24 hours
                 )
-                set_user_points(group_id, user_id, 0)
+                set_user_points(group_id, user_id, 0) # Reset points to 0
                 await context.bot.send_message(
                     chat_id=group_id,
-                    text=f"{user_mention} has dropped into negative points! They have been muted for 24 hours and their points reset to 0.",
+                    text=f"{user_mention} has dropped into negative points (Strike {current_strikes}/3). They have been muted for 24 hours and their points reset to 0.",
                     parse_mode='HTML'
                 )
             except Exception:
-                logger.exception(f"Failed to mute user {user_id} for negative points.")
+                logger.exception(f"Failed to mute user {user_id} for negative points (Strike {current_strikes}).")
         else:
+            # On the third strike, send a special message and notify admins.
+            tracker[group_id_str][user_id_str] = 0  # Reset strikes after 3rd strike
+            save_negative_tracker(tracker)
+
             chat = await context.bot.get_chat(group_id)
             admins = await context.bot.get_chat_administrators(group_id)
             await context.bot.send_message(
                 chat_id=group_id,
-                text=f"{user_mention} has reached negative points for the third time. A special punishment from the admins is coming, and you are not allowed to refuse if you wish to remain in the group.",
+                text=f"🚨 <b>Third Strike!</b> 🚨\n{user_mention} has reached negative points for the third time. A special punishment from the admins is coming, and you are not allowed to refuse if you wish to remain in the group.",
                 parse_mode='HTML'
             )
             for admin in admins:
                 try:
                     await context.bot.send_message(
                         chat_id=admin.user.id,
-                        text=f"User {user_mention} in group {chat.title} has reached negative points for the third time and requires a special punishment.",
+                        text=f"User {user_mention} in group '{chat.title}' has reached negative points for the third time and requires a special punishment. Their strike counter has been reset.",
                         parse_mode='HTML'
                     )
                 except Exception:
