@@ -21,7 +21,53 @@ BOT_USERNAME: Final = '@MasterBeanoBot'  # Bot's username (update if needed)
 # File paths for persistent data storage
 HASHTAG_DATA_FILE = 'hashtag_data.json'  # Stores hashtagged messages/media
 ADMIN_DATA_FILE = 'admins.json'          # Stores admin/owner info
+from functools import wraps
 OWNER_ID = 7237569475  # Your Telegram ID (change to your actual Telegram user ID)
+
+
+# =========================
+# Decorators
+# =========================
+def command_handler_wrapper(admin_only=False):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            # Do not process if the message is not from a user
+            if not update.effective_user or not update.message:
+                return
+
+            user = update.effective_user
+            chat = update.effective_chat
+            message_id = update.message.message_id
+
+            # Defer message deletion to the end
+            should_delete = True
+
+            try:
+                if admin_only and chat.type in ['group', 'supergroup']:
+                    member = await context.bot.get_chat_member(chat.id, user.id)
+                    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                        await update.message.reply_text(
+                            f"Warning: {user.mention_html()}, you are not authorized to use this command.",
+                            parse_mode='HTML'
+                        )
+                        # Still delete their command attempt
+                        return
+
+                # Execute the actual command function
+                await func(update, context, *args, **kwargs)
+
+            finally:
+                # Delete the command message
+                if should_delete and chat.type in ['group', 'supergroup']:
+                    try:
+                        await context.bot.delete_message(chat.id, message_id)
+                    except Exception as e:
+                        print(f"Failed to delete command message {message_id} in chat {chat.id}: {e}")
+
+        return wrapper
+    return decorator
+
 
 # =============================
 # Admin/Owner Data Management
@@ -231,7 +277,71 @@ async def add_user_points(group_id, user_id, delta, context: ContextTypes.DEFAUL
     points = get_user_points(group_id, user_id) + delta
     set_user_points(group_id, user_id, points)
     print(f"[DEBUG] Added {delta} points for user {user_id} in group {group_id} (new total: {points})")
+
+    # Run all punishment checks
     await check_for_punishment(group_id, user_id, context)
+    await check_for_negative_points(group_id, user_id, points, context)
+
+# =============================
+# Negative Points Tracker
+# =============================
+NEGATIVE_POINTS_TRACKER_FILE = 'negative_points_tracker.json'
+
+def load_negative_tracker():
+    if os.path.exists(NEGATIVE_POINTS_TRACKER_FILE):
+        with open(NEGATIVE_POINTS_TRACKER_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_negative_tracker(data):
+    with open(NEGATIVE_POINTS_TRACKER_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+async def check_for_negative_points(group_id, user_id, points, context: ContextTypes.DEFAULT_TYPE):
+    if points < 0:
+        tracker = load_negative_tracker()
+        user_id_str = str(user_id)
+
+        tracker[user_id_str] = tracker.get(user_id_str, 0) + 1
+        save_negative_tracker(tracker)
+
+        count = tracker[user_id_str]
+        user_member = await context.bot.get_chat_member(group_id, user_id)
+        user_mention = user_member.user.mention_html()
+
+        if count < 3:
+            try:
+                await context.bot.restrict_chat_member(
+                    chat_id=group_id,
+                    user_id=user_id,
+                    permissions={'can_send_messages': False},
+                    until_date=time.time() + 86400
+                )
+                set_user_points(group_id, user_id, 0)
+                await context.bot.send_message(
+                    chat_id=group_id,
+                    text=f"{user_mention} has dropped into negative points! They have been muted for 24 hours and their points reset to 0.",
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                print(f"Failed to mute user {user_id} for negative points: {e}")
+        else:
+            chat = await context.bot.get_chat(group_id)
+            admins = await context.bot.get_chat_administrators(group_id)
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=f"{user_mention} has reached negative points for the third time. A special punishment from the admins is coming, and you are not allowed to refuse if you wish to remain in the group.",
+                parse_mode='HTML'
+            )
+            for admin in admins:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin.user.id,
+                        text=f"User {user_mention} in group {chat.title} has reached negative points for the third time and requires a special punishment.",
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    print(f"Failed to notify admin {admin.user.id} about 3rd strike: {e}")
 
 # =============================
 # Chance Game Helpers
@@ -833,6 +943,7 @@ REMOVEREWARD_STATE = 'awaiting_removereward_name'
 ADDPOINTS_STATE = 'awaiting_addpoints_value'
 REMOVEPOINTS_STATE = 'awaiting_removepoints_value'
 
+@command_handler_wrapper(admin_only=False)
 async def reward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /reward: Show reward list, ask user to choose, handle purchase or 'Other'.
@@ -916,13 +1027,21 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("That reward does not exist. Please reply with a valid reward name or type /cancel.")
             return
         if reward['name'].lower() == 'other':
-            await update.message.reply_text("Communicate with either your owner or the beta to discuss what you want your reward to be and what it would cost you.")
+            user_mention = update.effective_user.mention_html()
+            chat_title = update.effective_chat.title
+
+            await update.message.reply_text(
+                f"{user_mention}, you have selected 'Other'. Please contact Beta or Lion to determine your reward and its cost.",
+                parse_mode='HTML'
+            )
+
             admins = await context.bot.get_chat_administrators(update.effective_chat.id)
             for admin in admins:
                 try:
                     await context.bot.send_message(
                         chat_id=admin.user.id,
-                        text=f"User @{update.effective_user.username or ''} (ID: {user_id}) selected the reward 'Other'. Instruct them to discuss their reward and cost with you.",
+                        text=f"User {user_mention} has selected the 'Other' reward in group {chat_title}. They will contact you to finalize the details.",
+                        parse_mode='HTML'
                     )
                 except Exception:
                     pass
@@ -1111,6 +1230,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No reward selection in progress.")
 
+@command_handler_wrapper(admin_only=True)
 async def addreward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addreward (admin only): Start add reward process
@@ -1118,26 +1238,16 @@ async def addreward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         await update.message.reply_text("This command can only be used in group chats.")
         return
-    user = update.effective_user
-    member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-    is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    if not is_admin_user:
-        await update.message.reply_text("Only admins can use this command.")
-        return
     context.user_data[ADDREWARD_STATE] = {'group_id': str(update.effective_chat.id)}
     await update.message.reply_text("What is the name of the reward you want to add?")
 
+@command_handler_wrapper(admin_only=True)
 async def addpunishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addpunishment <threshold> <message> (admin only): Adds a new punishment.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
-        return
-
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
         return
 
     if len(context.args) < 2:
@@ -1168,17 +1278,13 @@ async def addpunishment_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text(f"Punishment added: '{message}' at {threshold} points.")
 
+@command_handler_wrapper(admin_only=True)
 async def removepunishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removepunishment <message> (admin only): Removes a punishment.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
-        return
-
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
         return
 
     if not context.args:
@@ -1202,6 +1308,7 @@ async def removepunishment_command(update: Update, context: ContextTypes.DEFAULT
         save_punishments_data(punishments_data)
         await update.message.reply_text("Punishment removed.")
 
+@command_handler_wrapper(admin_only=False)
 async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /newgame (as a reply): Starts a new game with the replied-to user.
@@ -1252,17 +1359,13 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Failed to send private message to user {challenger.id}: {e}")
         await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
 
+@command_handler_wrapper(admin_only=True)
 async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /loser <user> (admin only): Enacts the loser condition for the specified user.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
-        return
-
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
         return
 
     if not context.args:
@@ -1323,6 +1426,7 @@ async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game['status'] = 'complete'
     save_games_data(games_data)
 
+@command_handler_wrapper(admin_only=False)
 async def chance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /chance (once per day): Play a game of chance for a random outcome.
@@ -1377,17 +1481,13 @@ async def chance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     set_last_played(user_id)
 
+@command_handler_wrapper(admin_only=True)
 async def cleangames_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /cleangames (admin only): Clears out completed or stale game data.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
-        return
-
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
         return
 
     games_data = load_games_data()
@@ -1402,17 +1502,13 @@ async def cleangames_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         save_games_data(games_to_keep)
         await update.message.reply_text("Cleaned up completed games.")
 
+@command_handler_wrapper(admin_only=True)
 async def punishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /punishment (admin only): Lists all punishments for the group.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
-        return
-
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
         return
 
     group_id = str(update.effective_chat.id)
@@ -1429,30 +1525,20 @@ async def punishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.message.reply_text(msg, parse_mode='HTML')
 
+@command_handler_wrapper(admin_only=True)
 async def removereward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removereward (admin only): Start remove reward process
     """
-    user = update.effective_user
-    member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-    is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    if not is_admin_user:
-        await update.message.reply_text("Only admins can use this command.")
-        return
     context.user_data[REMOVEREWARD_STATE] = {'group_id': str(update.effective_chat.id)}
     await update.message.reply_text("What is the name of the reward you want to remove?")
 
+@command_handler_wrapper(admin_only=True)
 async def addpoints_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addpoints <username|id> (admin only): Start add points process
     """
     group_id = str(update.effective_chat.id)
-    user = update.effective_user
-    member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-    is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    if not is_admin_user:
-        await update.message.reply_text("Only admins can use this command.")
-        return
     # If used as a reply, use the replied-to user's ID
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target_id = update.message.reply_to_message.from_user.id
@@ -1474,17 +1560,12 @@ async def addpoints_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[ADDPOINTS_STATE] = {'group_id': group_id, 'target_id': target_id}
     await update.message.reply_text(f"How many points do you want to add to this user?")
 
+@command_handler_wrapper(admin_only=True)
 async def removepoints_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removepoints <username|id> (admin only): Start remove points process
     """
     group_id = str(update.effective_chat.id)
-    user = update.effective_user
-    member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-    is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    if not is_admin_user:
-        await update.message.reply_text("Only admins can use this command.")
-        return
     # If used as a reply, use the replied-to user's ID
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target_id = update.message.reply_to_message.from_user.id
@@ -1506,6 +1587,7 @@ async def removepoints_command(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data[REMOVEPOINTS_STATE] = {'group_id': group_id, 'target_id': target_id}
     await update.message.reply_text(f"How many points do you want to remove from this user?")
 
+@command_handler_wrapper(admin_only=False)
 async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /point (user: see own points, admin: see own or another's points)
@@ -1545,17 +1627,12 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     points = get_user_points(group_id, target_id)
     await update.message.reply_text(f"User {arg} has {points} points.")
 
+@command_handler_wrapper(admin_only=True)
 async def top5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /top5 (admin only): Show top 5 users by points in the group
     """
     group_id = str(update.effective_chat.id)
-    user = update.effective_user
-    member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
-    is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    if not is_admin_user:
-        await update.message.reply_text("Only admins can use this command.")
-        return
     data = load_points_data().get(group_id, {})
     if not data:
         await update.message.reply_text("No points data for this group yet.")
@@ -1749,6 +1826,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 # =============================
 # /command - List all commands
 # =============================
+@command_handler_wrapper(admin_only=False)
 async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Lists all available commands, showing which are admin-only and which are disabled.
@@ -1813,6 +1891,7 @@ def save_disabled_commands(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 # /remove - Remove a dynamic hashtag command or disable a static command (admin only)
+@command_handler_wrapper(admin_only=True)
 async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
@@ -1825,11 +1904,6 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     tag = context.args[0].lstrip('#/').lower()
     data = load_hashtag_data()
-    # Check admin status in the group via Telegram
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
-        return
     # Dynamic command removal
     if tag in data:
         del data[tag]
@@ -1854,6 +1928,7 @@ ADMIN_HELP_STATE = 'awaiting_admin_help_reason'
 
 # /admin command implementation
 # Any user in a group chat can use this command to request help from group admins. Only admins will receive the notification.
+@command_handler_wrapper(admin_only=False)
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
@@ -1885,6 +1960,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[ADMIN_HELP_STATE] = True
 
 
+@command_handler_wrapper(admin_only=True)
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /link (admin only): Creates a single-use invite link for the group.
@@ -1900,12 +1976,6 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if chat.type in ['group', 'supergroup']:
-        # Check if the user is an admin
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            await update.message.reply_text("Only admins can use this command.")
-            return
-
         try:
             # Create a single-use invite link
             invite_link = await context.bot.create_chat_invite_link(
@@ -1938,6 +2008,7 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 #Start command
+@command_handler_wrapper(admin_only=False)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].startswith('setstake_'):
         return  # This is handled by the game setup conversation handler
@@ -1963,6 +2034,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Hey there fag! What can I help you with?')
 
 #Help command
+@command_handler_wrapper(admin_only=False)
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
@@ -1987,6 +2059,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     'If you have issues in one of our groups contact @Lionspridechatbot or use the @admin function directly in our groups.')
 
 #BeOwned command
+@command_handler_wrapper(admin_only=False)
 async def beowned_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
@@ -2599,6 +2672,7 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
 # =============================
 # /inactive command and auto-kick logic
 # =============================
+@command_handler_wrapper(admin_only=True)
 async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /inactive <days> (admin only):
@@ -2607,10 +2681,6 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
-        return
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
-    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-        await update.message.reply_text("Only admins can use this command.")
         return
     if not context.args or not context.args[0].strip().isdigit():
         await update.message.reply_text("Usage: /inactive <days> (0 to disable, 1-99 to enable)")
@@ -2662,6 +2732,33 @@ async def check_and_kick_inactive_users(app):
         except Exception as e:
             print(f"[ERROR] Failed to process group {group_id} for inactivity kicking: {e}")
 
+# =============================
+# Command Router
+# =============================
+async def command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes commands starting with /, ., or ! to the appropriate handler."""
+    message_text = update.message.text
+    command_with_prefix = message_text.split()[0]
+    command = command_with_prefix[1:].lower()
+
+    context.args = message_text.split()[1:]
+
+    handler = COMMAND_MAP.get(command)
+    if handler:
+        await handler(update, context)
+
+COMMAND_MAP = {
+    'start': start_command, 'help': help_command, 'beowned': beowned_command,
+    'command': command_list_command, 'remove': remove_command, 'admin': admin_command,
+    'link': link_command, 'inactive': inactive_command, 'addreward': addreward_command,
+    'removereward': removereward_command, 'addpunishment': addpunishment_command,
+    'removepunishment': removepunishment_command, 'punishment': punishment_command,
+    'newgame': newgame_command, 'loser': loser_command, 'cleangames': cleangames_command,
+    'chance': chance_command, 'reward': reward_command, 'cancel': cancel_command,
+    'addpoints': addpoints_command, 'removepoints': removepoints_command,
+    'point': point_command, 'top5': top5_command,
+}
+
 if __name__ == '__main__':
     print('Starting Telegram Bot...')
     print(f'TOKEN value: {TOKEN}')
@@ -2677,37 +2774,13 @@ if __name__ == '__main__':
     app = Application.builder().token(TOKEN).post_init(on_startup).build()
 
     #Commands
-    app.add_handler(CommandHandler('start', start_command))
-    app.add_handler(CommandHandler('help', help_command))
-    app.add_handler(CommandHandler('beowned', beowned_command))
-    app.add_handler(CommandHandler('command', command_list_command))
-    app.add_handler(CommandHandler('remove', remove_command))
-    app.add_handler(CommandHandler('admin', admin_command))
-    app.add_handler(CommandHandler('link', link_command))
-    app.add_handler(CommandHandler('inactive', inactive_command))
-    app.add_handler(CommandHandler('addreward', addreward_command))
-    app.add_handler(CommandHandler('removereward', removereward_command))
-    app.add_handler(CommandHandler('addpunishment', addpunishment_command))
-    app.add_handler(CommandHandler('removepunishment', removepunishment_command))
-    app.add_handler(CommandHandler('punishment', punishment_command))
-    app.add_handler(CommandHandler('newgame', newgame_command))
-    app.add_handler(CommandHandler('loser', loser_command))
-    app.add_handler(CommandHandler('cleangames', cleangames_command))
-    app.add_handler(CommandHandler('chance', chance_command))
-    app.add_handler(CommandHandler('reward', reward_command))
-    app.add_handler(CommandHandler('cancel', cancel_command))
-    app.add_handler(CommandHandler('addpoints', addpoints_command))
-    app.add_handler(CommandHandler('removepoints', removepoints_command))
-    app.add_handler(CommandHandler('point', point_command))
-    app.add_handler(CommandHandler('top5', top5_command))
-
     # Add the conversation handler with a high priority
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_handler), group=-1)
 
     game_setup_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_game_setup, pattern='^start_game_setup_'),
-            CommandHandler('start', start_opponent_setup, filters=filters.Regex('^setstake_'))
+            # The command router will handle the /start setstake command
         ],
         states={
             GAME_SELECTION: [CallbackQueryHandler(game_selection)],
@@ -2729,7 +2802,7 @@ if __name__ == '__main__':
         states={
             BS_AWAITING_PLACEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bs_handle_placement)],
         },
-        fallbacks=[CommandHandler('cancel', bs_placement_cancel)],
+        fallbacks=[MessageHandler(filters.Regex(r'^[./!](cancel)$'), command_router)],
         conversation_timeout=600  # 10 minutes to place all ships
     )
     app.add_handler(battleship_placement_handler)
@@ -2741,7 +2814,9 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack_'))
     app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
 
-    app.add_handler(MessageHandler(filters.COMMAND, dynamic_hashtag_command))
+    # Add the command router for /, ., and ! prefixes. This replaces all CommandHandlers.
+    app.add_handler(MessageHandler(filters.Regex(r'^[./!]\w+'), command_router))
+
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
     async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
