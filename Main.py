@@ -527,6 +527,25 @@ def check_connect_four_draw(board: list) -> bool:
     """Check for a draw in Connect Four."""
     return all(cell != 0 for cell in board[0])
 
+
+async def delete_tracked_messages(context: ContextTypes.DEFAULT_TYPE, game_id: str):
+    """Deletes all tracked messages for a game and clears the list."""
+    games_data = load_games_data()
+    game = games_data.get(game_id)
+    if not game:
+        return
+
+    for msg in game.get('messages_to_delete', []):
+        try:
+            await context.bot.delete_message(chat_id=msg['chat_id'], message_id=msg['message_id'])
+        except Exception:
+            pass  # Ignore errors
+
+    if game_id in games_data:
+        games_data[game_id]['messages_to_delete'] = []
+        save_games_data(games_data)
+
+
 async def send_and_track_message(context, chat_id, game_id, text, **kwargs):
     """Sends a message and tracks it for later deletion."""
     sent_message = await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
@@ -579,16 +598,8 @@ async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, win
             await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
 
     game['status'] = 'complete'
-
-    # Delete messages
-    for msg in game.get('messages_to_delete', []):
-        try:
-            await context.bot.delete_message(chat_id=msg['chat_id'], message_id=msg['message_id'])
-        except Exception:
-            pass # Ignore errors if message is already deleted or not found
-    game['messages_to_delete'] = [] # Clear the list
-
     save_games_data(games_data)
+    await delete_tracked_messages(context, game_id)
 
 
 async def connect_four_move_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -867,7 +878,8 @@ async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
-    _, _, game_id = query.data.split('_')
+    *_, game_id = query.data.split('_')
+    game_id = "_".join(game_id) # Should not be necessary but good practice
     user_id = str(query.from_user.id)
 
     games_data = load_games_data()
@@ -1419,7 +1431,7 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_games_data(games_data)
 
     try:
-        keyboard = [[InlineKeyboardButton("Start Game Setup", callback_data=f"start_game_setup_{game_id}")]]
+        keyboard = [[InlineKeyboardButton("Start Game Setup", callback_data=f"start_game_setup:{game_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         sent_message = await context.bot.send_message(
             chat_id=challenger_user.id,
@@ -1985,13 +1997,13 @@ async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Starts the game setup conversation."""
     query = update.callback_query
     await query.answer()
-    game_id = query.data.split('_')[-1]
+    game_id = query.data.split(':')[-1]
     context.user_data['game_id'] = game_id
 
     keyboard = [
-        [InlineKeyboardButton("Dice Game", callback_data='game_dice')],
-        [InlineKeyboardButton("Connect Four", callback_data='game_connect_four')],
-        [InlineKeyboardButton("Battleship", callback_data='game_battleship')],
+        [InlineKeyboardButton("Dice Game", callback_data=f'game_dice:{game_id}')],
+        [InlineKeyboardButton("Connect Four", callback_data=f'game_connect_four:{game_id}')],
+        [InlineKeyboardButton("Battleship", callback_data=f'game_battleship:{game_id}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2005,9 +2017,7 @@ async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handles the game selection."""
     query = update.callback_query
     await query.answer()
-    game_type = query.data
-
-    game_id = context.user_data['game_id']
+    game_type, game_id = query.data.split(':')
     games_data = load_games_data()
     games_data[game_id]['game_type'] = game_type
 
@@ -2048,7 +2058,8 @@ async def round_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handles the round selection for the Dice Game."""
     query = update.callback_query
     await query.answer()
-    rounds = int(query.data.split('_')[-1])
+    _, rounds_str = query.data.split(':')
+    rounds = int(rounds_str)
 
     game_id = context.user_data['game_id']
     games_data = load_games_data()
@@ -2056,8 +2067,8 @@ async def round_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     save_games_data(games_data)
 
     keyboard = [
-        [InlineKeyboardButton("Points", callback_data='stake_points')],
-        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data='stake_media')],
+        [InlineKeyboardButton("Points", callback_data=f'stake_points:{game_id}')],
+        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data=f'stake_media:{game_id}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2071,7 +2082,7 @@ async def stake_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handles the stake type selection."""
     query = update.callback_query
     await query.answer()
-    stake_type = query.data
+    stake_type, game_id = query.data.split(':')
 
     if stake_type == 'stake_points':
         await query.edit_message_text(text="How many points would you like to stake?")
@@ -2104,6 +2115,7 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
         save_games_data(games_data)
 
         if context.user_data.get('player_role') == 'opponent':
+            await delete_tracked_messages(context, game_id)
             game = games_data[game_id]
             if game['game_type'] == 'game_dice':
                 game['current_round'] = 1
@@ -2202,6 +2214,7 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
     save_games_data(games_data)
 
     if context.user_data.get('player_role') == 'opponent':
+        await delete_tracked_messages(context, game_id)
         game = games_data[game_id]
         if game['game_type'] == 'game_dice':
             game['current_round'] = 1
@@ -2286,9 +2299,9 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
     keyboard = [
-        [InlineKeyboardButton("Confirm", callback_data=f'confirm_game_{game_id}')],
-        [InlineKeyboardButton("Cancel", callback_data=f'cancel_game_{game_id}')],
-        [InlineKeyboardButton("Restart", callback_data=f'restart_game_{game_id}')],
+        [InlineKeyboardButton("Confirm", callback_data=f'confirm_game:{game_id}')],
+        [InlineKeyboardButton("Cancel", callback_data=f'cancel_game:{game_id}')],
+        [InlineKeyboardButton("Restart", callback_data=f'restart_game:{game_id}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2303,7 +2316,7 @@ async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYP
     """Entry point for the opponent to set up their stake via callback."""
     query = update.callback_query
     await query.answer()
-    game_id = query.data.split('_')[-1]
+    game_id = query.data.split(':')[-1]
 
     games_data = load_games_data()
     game = games_data.get(game_id)
@@ -2344,7 +2357,7 @@ async def confirm_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Confirms the game setup and sends the challenge to the group."""
     query = update.callback_query
     await query.answer()
-    game_id = query.data.split('_')[-1]
+    game_id = query.data.split(':')[-1]
 
     games_data = load_games_data()
     game = games_data[game_id]
@@ -2524,7 +2537,7 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
-    response_type, game_id = query.data.rsplit('_', 1)
+    response_type, game_id = query.data.rsplit(':', 1)
 
     games_data = load_games_data()
     game = games_data.get(game_id)
@@ -2644,26 +2657,26 @@ if __name__ == '__main__':
 
     game_setup_handler = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(start_game_setup, pattern='^start_game_setup_'),
-            CallbackQueryHandler(start_opponent_setup, pattern='^opponent_setup_')
+            CallbackQueryHandler(start_game_setup, pattern='^start_game_setup:'),
+            CallbackQueryHandler(start_opponent_setup, pattern='^opponent_setup:')
         ],
         states={
-            GAME_SELECTION: [CallbackQueryHandler(game_selection)],
-            ROUND_SELECTION: [CallbackQueryHandler(round_selection)],
-            STAKE_TYPE_SELECTION: [CallbackQueryHandler(stake_type_selection)],
+            GAME_SELECTION: [CallbackQueryHandler(game_selection, pattern='^game_dice:.*|game_connect_four:.*|game_battleship:.*')],
+            ROUND_SELECTION: [CallbackQueryHandler(round_selection, pattern='^rounds_.*')],
+            STAKE_TYPE_SELECTION: [CallbackQueryHandler(stake_type_selection, pattern='^stake_.*')],
             STAKE_SUBMISSION_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, stake_submission_points)],
             STAKE_SUBMISSION_MEDIA: [MessageHandler(filters.ATTACHMENT, stake_submission_media)],
             CONFIRMATION: [
-                CallbackQueryHandler(confirm_game_setup, pattern='^confirm_game_'),
-                CallbackQueryHandler(restart_game_setup, pattern='^restart_game_'),
-                CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_'),
+                CallbackQueryHandler(confirm_game_setup, pattern='^confirm_game:'),
+                CallbackQueryHandler(restart_game_setup, pattern='^restart_game:'),
+                CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game:'),
             ],
         },
-        fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_')],
+        fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game:')],
     )
     # Battleship placement handler
     battleship_placement_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(bs_start_placement, pattern='^bs_start_placement_')],
+        entry_points=[CallbackQueryHandler(bs_start_placement, pattern='^bs_start_placement:')],
         states={
             BS_AWAITING_PLACEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bs_handle_placement)],
         },
@@ -2673,12 +2686,12 @@ if __name__ == '__main__':
     app.add_handler(battleship_placement_handler)
 
     app.add_handler(game_setup_handler)
-    app.add_handler(CallbackQueryHandler(challenge_response_handler, pattern='^(accept_challenge_|refuse_challenge_)'))
-    app.add_handler(CallbackQueryHandler(connect_four_move_handler, pattern=r'^c4_move_'))
-    app.add_handler(CallbackQueryHandler(bs_select_col_handler, pattern=r'^bs_col_'))
-    app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack_'))
+    app.add_handler(CallbackQueryHandler(challenge_response_handler, pattern='^(accept_challenge:|refuse_challenge:)'))
+    app.add_handler(CallbackQueryHandler(connect_four_move_handler, pattern=r'^c4_move:'))
+    app.add_handler(CallbackQueryHandler(bs_select_col_handler, pattern=r'^bs_col:'))
+    app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack:'))
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
-    app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
+    app.add_handler(MessageHandler(filters.Dice(), dice_roll_handler))
 
     # Errors
     app.add_error_handler(error_handler)
