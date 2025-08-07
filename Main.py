@@ -709,18 +709,25 @@ async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winner_id = game['challenger_id']
         loser_stake = game['opponent_stake']
 
+    loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
+    winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+
     if loser_stake['type'] == 'points':
         await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
         await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
-        await context.bot.send_message(game['group_id'], f"The loser has paid their stake of {loser_stake['value']} points to the winner.")
+        await context.bot.send_message(
+            game['group_id'],
+            f"{loser_member.user.mention_html()} is a loser! They lost {loser_stake['value']} points to {winner_member.user.mention_html()}.",
+            parse_mode='HTML'
+        )
     else:
-        caption = "The loser's stake has been exposed!"
+        caption = f"{loser_member.user.mention_html()} is a loser! This was their stake."
         if loser_stake['type'] == 'photo':
-            await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption)
+            await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
         elif loser_stake['type'] == 'video':
-            await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption)
+            await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
         elif loser_stake['type'] == 'voice':
-            await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption)
+            await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
 
     game['status'] = 'complete'
     save_games_data(games_data)
@@ -1625,15 +1632,21 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
             text=f"Your challenge was refused."
         )
 
+        challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
         if challenger_stake['type'] == 'points':
-            await context.bot.send_message(game['group_id'], f"The challenger has lost their stake of {challenger_stake['value']} points.")
+            await context.bot.send_message(
+                game['group_id'],
+                f"{challenger_member.user.mention_html()} is a loser for being refused! They lost {challenger_stake['value']} points.",
+                parse_mode='HTML'
+            )
         else:
+            caption = f"{challenger_member.user.mention_html()} is a loser for being refused! This was their stake."
             if challenger_stake['type'] == 'photo':
-                await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption="The challenger has lost their stake.")
+                await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
             elif challenger_stake['type'] == 'video':
-                await context.bot.send_video(game['group_id'], challenger_stake['value'], caption="The challenger has lost their stake.")
+                await context.bot.send_video(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
             elif challenger_stake['type'] == 'voice':
-                await context.bot.send_voice(game['group_id'], challenger_stake['value'], caption="The challenger has lost their stake.")
+                await context.bot.send_voice(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
 
         del games_data[game_id]
         save_games_data(games_data)
