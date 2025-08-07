@@ -2877,53 +2877,25 @@ async def check_and_kick_inactive_users(app):
             print(f"[ERROR] Failed to process group {group_id} for inactivity kicking: {e}")
 
 # =============================
-# Command Router
+# Command Registration Helper
 # =============================
-async def command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Routes commands starting with /, ., or ! to the appropriate handler."""
-    message_text = update.message.text
-    command_with_prefix = message_text.split()[0]
-    command = command_with_prefix[1:].lower()
+def add_command(app: Application, command: str, handler):
+    """
+    Registers a command with support for /, ., and ! prefixes.
+    """
+    # Wrapper for MessageHandlers to populate context.args
+    async def message_handler_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message and update.message.text:
+            context.args = update.message.text.split()[1:]
+        await handler(update, context)
 
-    # Let conversation handlers take priority for their entry points
-    if command.startswith('setstake_'):
-        return
+    # Register for /<command> - uses the original handler as it populates args automatically
+    app.add_handler(CommandHandler(command, handler))
 
-    context.args = message_text.split()[1:]
+    # Register for .<command> and !<command> - uses the wrapper
+    app.add_handler(MessageHandler(filters.Regex(rf'^\.{command}(\s|$)'), message_handler_wrapper))
+    app.add_handler(MessageHandler(filters.Regex(rf'^!{command}(\s|$)'), message_handler_wrapper))
 
-    command_info = COMMAND_MAP.get(command)
-    if command_info:
-        await command_info['function'](update, context)
-    else:
-        # Fallback to dynamic hashtag commands for any unknown command
-        await dynamic_hashtag_command(update, context)
-
-COMMAND_MAP = {
-    'start': {'function': start_command, 'is_admin': False},
-    'help': {'function': help_command, 'is_admin': False},
-    'beowned': {'function': beowned_command, 'is_admin': False},
-    'command': {'function': command_list_command, 'is_admin': False},
-    'remove': {'function': remove_command, 'is_admin': True},
-    'admin': {'function': admin_command, 'is_admin': False},
-    'link': {'function': link_command, 'is_admin': True},
-    'inactive': {'function': inactive_command, 'is_admin': True},
-    'addreward': {'function': addreward_command, 'is_admin': True},
-    'removereward': {'function': removereward_command, 'is_admin': True},
-    'addpunishment': {'function': addpunishment_command, 'is_admin': True},
-    'removepunishment': {'function': removepunishment_command, 'is_admin': True},
-    'punishment': {'function': punishment_command, 'is_admin': True},
-    'newgame': {'function': newgame_command, 'is_admin': False},
-    'loser': {'function': loser_command, 'is_admin': True},
-    'cleangames': {'function': cleangames_command, 'is_admin': True},
-    'chance': {'function': chance_command, 'is_admin': False},
-    'reward': {'function': reward_command, 'is_admin': False},
-    'cancel': {'function': cancel_command, 'is_admin': False},
-    'addpoints': {'function': addpoints_command, 'is_admin': True},
-    'removepoints': {'function': removepoints_command, 'is_admin': True},
-    'point': {'function': point_command, 'is_admin': False}, # Internal admin check
-    'top5': {'function': top5_command, 'is_admin': True},
-    'setnickname': {'function': setnickname_command, 'is_admin': True},
-}
 
 if __name__ == '__main__':
     print('Starting Telegram Bot...')
@@ -2940,6 +2912,32 @@ if __name__ == '__main__':
     app = Application.builder().token(TOKEN).post_init(on_startup).build()
 
     #Commands
+    # Register all commands using the new helper
+    add_command(app, 'start', start_command)
+    add_command(app, 'help', help_command)
+    add_command(app, 'beowned', beowned_command)
+    add_command(app, 'command', command_list_command)
+    add_command(app, 'remove', remove_command)
+    add_command(app, 'admin', admin_command)
+    add_command(app, 'link', link_command)
+    add_command(app, 'inactive', inactive_command)
+    add_command(app, 'addreward', addreward_command)
+    add_command(app, 'removereward', removereward_command)
+    add_command(app, 'addpunishment', addpunishment_command)
+    add_command(app, 'removepunishment', removepunishment_command)
+    add_command(app, 'punishment', punishment_command)
+    add_command(app, 'newgame', newgame_command)
+    add_command(app, 'loser', loser_command)
+    add_command(app, 'cleangames', cleangames_command)
+    add_command(app, 'chance', chance_command)
+    add_command(app, 'reward', reward_command)
+    add_command(app, 'cancel', cancel_command)
+    add_command(app, 'addpoints', addpoints_command)
+    add_command(app, 'removepoints', removepoints_command)
+    add_command(app, 'point', point_command)
+    add_command(app, 'top5', top5_command)
+    add_command(app, 'setnickname', setnickname_command)
+
     # Add the conversation handler with a high priority
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_handler), group=-1)
 
@@ -2980,9 +2978,6 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack_'))
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
-
-    # Add the command router for /, ., and ! prefixes. This replaces all CommandHandlers.
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^[./!].*'), command_router))
 
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
