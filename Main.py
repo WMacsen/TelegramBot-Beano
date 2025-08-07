@@ -734,20 +734,30 @@ async def removepunishment_command(update: Update, context: ContextTypes.DEFAULT
 
 async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /newgame (group only): Starts the process of setting up a new game.
+    /newgame (as a reply): Starts a new game with the replied-to user.
     """
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("This command can only be used in group chats.")
         return
 
-    user = update.effective_user
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please use this command as a reply to the user you want to challenge.")
+        return
+
+    challenger = update.effective_user
+    opponent = update.message.reply_to_message.from_user
+
+    if challenger.id == opponent.id:
+        await update.message.reply_text("You cannot challenge yourself.")
+        return
+
     game_id = str(uuid.uuid4())
     games_data = load_games_data()
 
     games_data[game_id] = {
         "group_id": update.effective_chat.id,
-        "challenger_id": user.id,
-        "opponent_id": None,
+        "challenger_id": challenger.id,
+        "opponent_id": opponent.id,
         "game_type": None,
         "challenger_stake": None,
         "opponent_stake": None,
@@ -755,20 +765,21 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     save_games_data(games_data)
 
-    # Public message
-    await update.message.reply_text(f"{user.mention_html()}, please check your private messages to set up the game.", parse_mode='HTML')
+    await update.message.reply_text(
+        f"{challenger.mention_html()} has challenged {opponent.mention_html()}! {challenger.mention_html()}, please check your private messages to set up the game.",
+        parse_mode='HTML'
+    )
 
-    # Private message with button
     try:
         keyboard = [[InlineKeyboardButton("Start Game Setup", callback_data=f"start_game_setup_{game_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.send_message(
-            chat_id=user.id,
+            chat_id=challenger.id,
             text="Let's set up your game! Click the button below to begin.",
             reply_markup=reply_markup
         )
     except Exception as e:
-        print(f"Failed to send private message to user {user.id}: {e}")
+        print(f"Failed to send private message to user {challenger.id}: {e}")
         await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
 
 async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1486,7 +1497,7 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =============================
 # Game Setup Conversation
 # =============================
-GAME_SELECTION, STAKE_TYPE_SELECTION, STAKE_SUBMISSION_POINTS, STAKE_SUBMISSION_MEDIA, OPPONENT_SELECTION, CONFIRMATION, FREE_REWARD_SELECTION, ASK_TASK_TARGET, ASK_TASK_DESCRIPTION = range(9)
+GAME_SELECTION, ROUND_SELECTION, STAKE_TYPE_SELECTION, STAKE_SUBMISSION_POINTS, STAKE_SUBMISSION_MEDIA, OPPONENT_SELECTION, CONFIRMATION, FREE_REWARD_SELECTION, ASK_TASK_TARGET, ASK_TASK_DESCRIPTION = range(10)
 
 async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the game setup conversation."""
@@ -1496,9 +1507,9 @@ async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data['game_id'] = game_id
 
     keyboard = [
-        [InlineKeyboardButton("Game A", callback_data='game_A')],
-        [InlineKeyboardButton("Game B", callback_data='game_B')],
-        [InlineKeyboardButton("Game C", callback_data='game_C')],
+        [InlineKeyboardButton("Dice Game", callback_data='game_dice')],
+        [InlineKeyboardButton("Connect Four", callback_data='game_connect_four')],
+        [InlineKeyboardButton("Battleship", callback_data='game_battleship')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1509,7 +1520,7 @@ async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return GAME_SELECTION
 
 async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the game selection and asks for the stake type."""
+    """Handles the game selection."""
     query = update.callback_query
     await query.answer()
     game_type = query.data
@@ -1517,6 +1528,42 @@ async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     game_id = context.user_data['game_id']
     games_data = load_games_data()
     games_data[game_id]['game_type'] = game_type
+    save_games_data(games_data)
+
+    if game_type == 'game_dice':
+        keyboard = [
+            [InlineKeyboardButton("Best of 3", callback_data='rounds_3')],
+            [InlineKeyboardButton("Best of 5", callback_data='rounds_5')],
+            [InlineKeyboardButton("Best of 9", callback_data='rounds_9')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="How many rounds would you like to play?",
+            reply_markup=reply_markup
+        )
+        return ROUND_SELECTION
+    else:
+        # Placeholder for other games
+        keyboard = [
+            [InlineKeyboardButton("Points", callback_data='stake_points')],
+            [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data='stake_media')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="What would you like to stake?",
+            reply_markup=reply_markup
+        )
+        return STAKE_TYPE_SELECTION
+
+async def round_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the round selection for the Dice Game."""
+    query = update.callback_query
+    await query.answer()
+    rounds = int(query.data.split('_')[-1])
+
+    game_id = context.user_data['game_id']
+    games_data = load_games_data()
+    games_data[game_id]['rounds_to_play'] = rounds
     save_games_data(games_data)
 
     keyboard = [
@@ -1546,6 +1593,7 @@ async def stake_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the submission of points as a stake."""
+    print("[DEBUG] In stake_submission_points")
     try:
         points = int(update.message.text)
         user_id = update.effective_user.id
@@ -1565,9 +1613,14 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
         save_games_data(games_data)
 
         if context.user_data.get('player_role') == 'opponent':
-            games_data[game_id]['status'] = 'active'
-            save_games_data(games_data)
             game = games_data[game_id]
+            if game['game_type'] == 'game_dice':
+                game['current_round'] = 1
+                game['challenger_score'] = 0
+                game['opponent_score'] = 0
+                game['last_roll'] = None
+            game['status'] = 'active'
+            save_games_data(games_data)
             challenger = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
             opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
             await context.bot.send_message(
@@ -1577,8 +1630,8 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
             )
             return ConversationHandler.END
         else:
-            await update.message.reply_text("Who would you like to challenge? Please provide their @username.")
-            return OPPONENT_SELECTION
+            # Since opponent is already selected, go straight to confirmation
+            return await show_confirmation(update, context)
 
     except ValueError:
         await update.message.reply_text("Please enter a valid number of points.")
@@ -1586,6 +1639,7 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
 
 async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the submission of media as a stake."""
+    print("[DEBUG] In stake_submission_media")
     message = update.message
     file_id = None
     media_type = None
@@ -1613,9 +1667,14 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
     save_games_data(games_data)
 
     if context.user_data.get('player_role') == 'opponent':
-        games_data[game_id]['status'] = 'active'
-        save_games_data(games_data)
         game = games_data[game_id]
+        if game['game_type'] == 'game_dice':
+            game['current_round'] = 1
+            game['challenger_score'] = 0
+            game['opponent_score'] = 0
+            game['last_roll'] = None
+        game['status'] = 'active'
+        save_games_data(games_data)
         challenger = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
         opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
         await context.bot.send_message(
@@ -1625,34 +1684,22 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
         )
         return ConversationHandler.END
     else:
-        await update.message.reply_text("Who would you like to challenge? Please provide their @username.")
-        return OPPONENT_SELECTION
+        return await show_confirmation(update, context)
 
-async def opponent_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the selection of an opponent."""
-    username = update.message.text.strip()
-    if not username.startswith('@'):
-        await update.message.reply_text("Please provide a valid @username.")
-        return OPPONENT_SELECTION
-
+async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Shows the confirmation message."""
     game_id = context.user_data['game_id']
     games_data = load_games_data()
-    group_id = games_data[game_id]['group_id']
-
-    opponent_id = await get_user_id_by_username(context, group_id, username)
-
-    if not opponent_id:
-        await update.message.reply_text(f"Could not find user {username} in the group.")
-        return OPPONENT_SELECTION
-
-    games_data[game_id]['opponent_id'] = opponent_id
-    save_games_data(games_data)
-
-    # Show confirmation
     game = games_data[game_id]
-    stake_type = game['challenger_stake']['type']
-    stake_value = game['challenger_stake']['value']
-    opponent = await context.bot.get_chat_member(group_id, opponent_id)
+
+    if context.user_data.get('player_role') == 'opponent':
+        stake_type = game['opponent_stake']['type']
+        stake_value = game['opponent_stake']['value']
+    else:
+        stake_type = game['challenger_stake']['type']
+        stake_value = game['challenger_stake']['value']
+
+    opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
 
     confirmation_text = (
         f"<b>Game Setup Confirmation</b>\n\n"
@@ -1669,7 +1716,11 @@ async def opponent_selection(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(confirmation_text, reply_markup=reply_markup, parse_mode='HTML')
+    if update.callback_query:
+        await update.callback_query.edit_message_text(confirmation_text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        await update.message.reply_text(confirmation_text, reply_markup=reply_markup, parse_mode='HTML')
+
     return CONFIRMATION
 
 async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1753,6 +1804,127 @@ async def confirm_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def restart_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Restarts the game setup conversation."""
     return await start_game_setup(update, context)
+
+async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles dice rolls for the Dice Game."""
+    if not update.message or not update.message.dice or update.message.dice.emoji != '🎲':
+        return
+
+    user_id = update.effective_user.id
+    games_data = load_games_data()
+
+    active_game_id = None
+    active_game = None
+    for game_id, game in games_data.items():
+        if game.get('game_type') == 'game_dice' and \
+           game.get('status') == 'active' and \
+           (game.get('challenger_id') == user_id or game.get('opponent_id') == user_id):
+            active_game_id = game_id
+            active_game = game
+            break
+
+    if not active_game:
+        return
+
+    # This is a lot of logic for one function. I will break it down in the future if needed.
+    last_roll = active_game.get('last_roll')
+
+    if not last_roll: # First roll of a round
+        active_game['last_roll'] = {'user_id': user_id, 'value': update.message.dice.value}
+        save_games_data(games_data)
+        other_player_id = active_game['challenger_id'] if user_id == active_game['opponent_id'] else active_game['opponent_id']
+        other_player = await context.bot.get_chat_member(active_game['group_id'], other_player_id)
+        await update.message.reply_text(f"You rolled a {update.message.dice.value}. Waiting for {other_player.user.mention_html()} to roll.", parse_mode='HTML')
+        return
+
+    if last_roll['user_id'] == user_id:
+        await update.message.reply_text("It's not your turn to roll.")
+        return
+
+    # Second roll of a round, determine winner
+    player1_id = last_roll['user_id']
+    player2_id = user_id
+    player1_roll = last_roll['value']
+    player2_roll = update.message.dice.value
+
+    if player1_roll > player2_roll:
+        winner_id = player1_id
+    elif player2_roll > player1_roll:
+        winner_id = player2_id
+    else: # Tie
+        await update.message.reply_text(f"You both rolled a {player1_roll}. It's a tie! Roll again.")
+        active_game['last_roll'] = None # Reset for re-roll
+        save_games_data(games_data)
+        return
+
+    # Update scores
+    if winner_id == active_game['challenger_id']:
+        active_game['challenger_score'] += 1
+    else:
+        active_game['opponent_score'] += 1
+
+    winner_member = await context.bot.get_chat_member(active_game['group_id'], winner_id)
+    await context.bot.send_message(
+        chat_id=active_game['group_id'],
+        text=f"{winner_member.user.mention_html()} wins round {active_game['current_round']}!\n"
+             f"Score: {active_game['challenger_score']} - {active_game['opponent_score']}",
+        parse_mode='HTML'
+    )
+
+    # Check for game over
+    rounds_to_win = (active_game['rounds_to_play'] // 2) + 1
+    if active_game['challenger_score'] >= rounds_to_win or active_game['opponent_score'] >= rounds_to_win:
+        # Game over
+        if active_game['challenger_score'] > active_game['opponent_score']:
+            game_winner_id = active_game['challenger_id']
+            game_loser_id = active_game['opponent_id']
+        else:
+            game_winner_id = active_game['opponent_id']
+            game_loser_id = active_game['challenger_id']
+
+        # Enact loser logic by calling the /loser command's logic
+        # This is code duplication. A better design would be to have a separate function.
+        # For now, I will duplicate the logic from loser_command.
+        game = active_game
+        loser_id = game_loser_id
+        winner_id = game_winner_id
+
+        if str(game['challenger_id']) == str(loser_id):
+            loser_stake = game['challenger_stake']
+        else:
+            loser_stake = game['opponent_stake']
+
+        loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
+        winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+
+        if loser_stake['type'] == 'points':
+            await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
+            await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
+            await context.bot.send_message(
+                game['group_id'],
+                f"{loser_member.user.mention_html()} is a loser! They lost {loser_stake['value']} points to {winner_member.user.mention_html()}.",
+                parse_mode='HTML'
+            )
+        else:
+            caption = f"{loser_member.user.mention_html()} is a loser! This was their stake."
+            if loser_stake['type'] == 'photo':
+                await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+            elif loser_stake['type'] == 'video':
+                await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+            elif loser_stake['type'] == 'voice':
+                await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+
+        game['status'] = 'complete'
+        save_games_data(games_data)
+    else:
+        # Next round
+        active_game['current_round'] += 1
+        active_game['last_roll'] = None
+        save_games_data(games_data)
+        await context.bot.send_message(
+            chat_id=active_game['group_id'],
+            text=f"Round {active_game['current_round']}! It's anyone's turn to roll."
+        )
 
 async def challenge_response_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the opponent's response to a game challenge."""
@@ -1931,10 +2103,10 @@ if __name__ == '__main__':
         ],
         states={
             GAME_SELECTION: [CallbackQueryHandler(game_selection)],
+            ROUND_SELECTION: [CallbackQueryHandler(round_selection)],
             STAKE_TYPE_SELECTION: [CallbackQueryHandler(stake_type_selection)],
             STAKE_SUBMISSION_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, stake_submission_points)],
             STAKE_SUBMISSION_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, stake_submission_media)],
-            OPPONENT_SELECTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, opponent_selection)],
             CONFIRMATION: [
                 CallbackQueryHandler(confirm_game_setup, pattern='^confirm_game_'),
                 CallbackQueryHandler(restart_game_setup, pattern='^restart_game_'),
@@ -1945,6 +2117,7 @@ if __name__ == '__main__':
     )
     app.add_handler(game_setup_handler)
     app.add_handler(CallbackQueryHandler(challenge_response_handler, pattern='^(accept_challenge_|refuse_challenge_)'))
+    app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
 
     app.add_handler(MessageHandler(filters.COMMAND, dynamic_hashtag_command))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
