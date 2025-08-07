@@ -72,6 +72,51 @@ def command_handler_wrapper(admin_only=False):
 # =============================
 # Admin/Owner Data Management
 # =============================
+ADMIN_NICKNAMES_FILE = 'admin_nicknames.json'
+
+def load_admin_nicknames():
+    if os.path.exists(ADMIN_NICKNAMES_FILE):
+        with open(ADMIN_NICKNAMES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_admin_nicknames(data):
+    with open(ADMIN_NICKNAMES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+@command_handler_wrapper(admin_only=True)
+async def setnickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("Only the owner can use this command.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /setnickname <@username or user_id> <nickname>")
+        return
+
+    target_identifier = context.args[0]
+    nickname = " ".join(context.args[1:])
+
+    target_id = None
+    if target_identifier.isdigit():
+        target_id = int(target_identifier)
+    else:
+        target_id = await get_user_id_by_username(context, update.effective_chat.id, target_identifier)
+
+    if not target_id:
+        await update.message.reply_text(f"Could not find user {target_identifier}.")
+        return
+
+    if not is_admin(target_id):
+        await update.message.reply_text("You can only set nicknames for admins.")
+        return
+
+    nicknames = load_admin_nicknames()
+    nicknames[str(target_id)] = nickname
+    save_admin_nicknames(nicknames)
+
+    await update.message.reply_text(f"Nickname for user {target_id} has been set to '{nickname}'.")
+
 def load_admin_data():
     """Load admin and owner data from file. Ensures owner is always in admin list."""
     if os.path.exists(ADMIN_DATA_FILE):
@@ -102,6 +147,16 @@ def is_owner(user_id):
     result = str(user_id) == str(data['owner'])
     print(f"[DEBUG] is_owner({user_id}) -> {result}")
     return result
+
+def get_display_name(user_id: int, full_name: str) -> str:
+    """
+    Determines the display name for a user based on their admin status and nickname.
+    """
+    if not is_admin(user_id):
+        return "fag"
+
+    nicknames = load_admin_nicknames()
+    return nicknames.get(str(user_id), full_name)
 
 def is_admin(user_id):
     """Check if the user is an admin or the owner."""
@@ -249,10 +304,11 @@ async def check_for_punishment(group_id, user_id, context: ContextTypes.DEFAULT_
         if user_points < threshold:
             if message not in triggered_punishments:
                 # Punish the user
-                user = await context.bot.get_chat_member(group_id, user_id)
+                user_member = await context.bot.get_chat_member(group_id, user_id)
+                display_name = get_display_name(user_id, user_member.user.full_name)
                 await context.bot.send_message(
                     chat_id=group_id,
-                    text=f"🚨 <b>Punishment Issued!</b> 🚨\n{user.user.mention_html()} has fallen below {threshold} points. Punishment: {message}",
+                    text=f"🚨 <b>Punishment Issued!</b> 🚨\n{display_name} has fallen below {threshold} points. Punishment: {message}",
                     parse_mode='HTML'
                 )
 
@@ -262,7 +318,7 @@ async def check_for_punishment(group_id, user_id, context: ContextTypes.DEFAULT_
                     try:
                         await context.bot.send_message(
                             chat_id=admin.user.id,
-                            text=f"User @{user.user.username or user.user.full_name} (ID: {user_id}) in group {chat.title} (ID: {group_id}) triggered punishment '{message}' by falling below {threshold} points."
+                            text=f"User {display_name} (ID: {user_id}) in group {chat.title} (ID: {group_id}) triggered punishment '{message}' by falling below {threshold} points."
                         )
                     except Exception as e:
                         print(f"Failed to notify admin {admin.user.id} about punishment: {e}")
@@ -470,6 +526,8 @@ async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, win
 
     loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
     winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+    loser_name = get_display_name(loser_id, loser_member.user.full_name)
+    winner_name = get_display_name(winner_id, winner_member.user.full_name)
 
     if loser_stake['type'] == 'points':
         points_val = loser_stake['value']
@@ -477,11 +535,11 @@ async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, win
         await add_user_points(game['group_id'], loser_id, -points_val, context)
         await context.bot.send_message(
             game['group_id'],
-            f"{winner_member.user.mention_html()} has won the game! {loser_member.user.mention_html()} lost {points_val} points.",
+            f"{winner_name} has won the game! {loser_name} lost {points_val} points.",
             parse_mode='HTML'
         )
     else:  # media
-        caption = f"{winner_member.user.mention_html()} won the game! This is the loser's stake."
+        caption = f"{winner_name} won the game! This is the loser's stake from {loser_name}."
         if loser_stake['type'] == 'photo':
             await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
         elif loser_stake['type'] == 'video':
@@ -538,11 +596,12 @@ async def connect_four_move_handler(update: Update, context: ContextTypes.DEFAUL
         loser_id = game['opponent_id'] if user_id == game['challenger_id'] else game['challenger_id']
 
         winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+        winner_name = get_display_name(winner_id, winner_member.user.full_name)
 
         board_text, _ = create_connect_four_board_markup(board, game_id)
 
         await query.edit_message_text(
-            f"<b>Connect Four - Game Over!</b>\n\n{board_text}\n{winner_member.user.mention_html()} wins!",
+            f"<b>Connect Four - Game Over!</b>\n\n{board_text}\n{winner_name} wins!",
             parse_mode='HTML'
         )
         await handle_game_over(context, game_id, winner_id, loser_id)
@@ -562,11 +621,12 @@ async def connect_four_move_handler(update: Update, context: ContextTypes.DEFAUL
 
     # Update board message
     turn_player_id = game['turn']
-    turn_player = await context.bot.get_chat_member(game['group_id'], turn_player_id)
+    turn_player_member = await context.bot.get_chat_member(game['group_id'], turn_player_id)
+    turn_player_name = get_display_name(turn_player_id, turn_player_member.user.full_name)
     board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
 
     await query.edit_message_text(
-        f"<b>Connect Four</b>\n\n{board_text}\nIt's {turn_player.user.mention_html()}'s turn.",
+        f"<b>Connect Four</b>\n\n{board_text}\nIt's {turn_player_name}'s turn.",
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
@@ -613,11 +673,12 @@ async def bs_start_game_in_group(context: ContextTypes.DEFAULT_TYPE, game_id: st
     game = games_data[game_id]
 
     challenger_id = game['challenger_id']
-    challenger = await context.bot.get_chat_member(game['group_id'], challenger_id)
+    challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
+    challenger_name = get_display_name(challenger_id, challenger_member.user.full_name)
 
     await context.bot.send_message(
         chat_id=game['group_id'],
-        text=f"All ships have been placed! The battle begins now.\n\nIt's {challenger.user.mention_html()}'s turn to attack. Check your private messages!",
+        text=f"All ships have been placed! The battle begins now.\n\nIt's {challenger_name}'s turn to attack. Check your private messages!",
         parse_mode='HTML'
     )
     await bs_send_turn_message(context, game_id)
@@ -710,9 +771,10 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_sunk = all(check_bs_ship_sunk(opponent_board, coords) for coords in game['ships'][opponent_id_str].values())
 
     if all_sunk:
+        winner_name = get_display_name(int(user_id_str), query.from_user.full_name)
         await context.bot.send_message(
             chat_id=game['group_id'],
-            text=f"The game is over! {query.from_user.mention_html()} has won the battle!",
+            text=f"The game is over! {winner_name} has won the battle!",
             parse_mode='HTML'
         )
         await handle_game_over(context, game_id, int(user_id_str), int(opponent_id_str))
@@ -722,22 +784,24 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game['turn'] = int(opponent_id_str)
     save_games_data(games_data)
 
-    opponent_user = await context.bot.get_chat_member(game['group_id'], int(opponent_id_str))
+    opponent_member = await context.bot.get_chat_member(game['group_id'], int(opponent_id_str))
+    opponent_name = get_display_name(int(opponent_id_str), opponent_member.user.full_name)
+    attacker_name = get_display_name(int(user_id_str), query.from_user.full_name)
     coord_name = f"{chr(ord('A')+c)}{r+1}"
 
-    await query.edit_message_text(f"You fired at {coord_name}. {result_text}\n\nWaiting for {opponent_user.user.mention_html()} to move.", parse_mode='HTML')
+    await query.edit_message_text(f"You fired at {coord_name}. {result_text}\n\nWaiting for {opponent_name} to move.", parse_mode='HTML')
 
     try:
         await context.bot.send_message(
             chat_id=int(opponent_id_str),
-            text=f"{query.from_user.full_name} fired at {coord_name}. {result_text}"
+            text=f"{attacker_name} fired at {coord_name}. {result_text}"
         )
     except Exception as e:
         print(f"Failed to send attack result to victim: {e}")
 
     await context.bot.send_message(
         chat_id=game['group_id'],
-        text=f"It is now {opponent_user.user.mention_html()}'s turn.",
+        text=f"It is now {opponent_name}'s turn.",
         parse_mode='HTML'
     )
 
@@ -1027,11 +1091,11 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("That reward does not exist. Please reply with a valid reward name or type /cancel.")
             return
         if reward['name'].lower() == 'other':
-            user_mention = update.effective_user.mention_html()
+            display_name = get_display_name(user_id, update.effective_user.full_name)
             chat_title = update.effective_chat.title
 
             await update.message.reply_text(
-                f"{user_mention}, you have selected 'Other'. Please contact Beta or Lion to determine your reward and its cost.",
+                f"{display_name}, you have selected 'Other'. Please contact Beta or Lion to determine your reward and its cost.",
                 parse_mode='HTML'
             )
 
@@ -1040,7 +1104,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 try:
                     await context.bot.send_message(
                         chat_id=admin.user.id,
-                        text=f"User {user_mention} has selected the 'Other' reward in group {chat_title}. They will contact you to finalize the details.",
+                        text=f"User {display_name} has selected the 'Other' reward in group {chat_title}. They will contact you to finalize the details.",
                         parse_mode='HTML'
                     )
                 except Exception:
@@ -1055,9 +1119,10 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await add_user_points(group_id, user_id, -reward['cost'], context)
 
         # Public announcement
+        display_name = get_display_name(user_id, update.effective_user.full_name)
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"🎁 <b>{update.effective_user.full_name}</b> just bought the reward: <b>{reward['name']}</b>! 🎉",
+            text=f"🎁 <b>{display_name}</b> just bought the reward: <b>{reward['name']}</b>! 🎉",
             parse_mode='HTML'
         )
 
@@ -1067,7 +1132,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_message(
                     chat_id=admin.user.id,
-                    text=f"User @{update.effective_user.username or update.effective_user.full_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) just bought the reward: '{reward['name']}' for {reward['cost']} points."
+                    text=f"User {display_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) just bought the reward: '{reward['name']}' for {reward['cost']} points."
                 )
             except Exception as e:
                 print(f"Failed to notify admin {admin.user.id} about reward purchase: {e}")
@@ -1113,6 +1178,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("That reward does not exist. Please reply with a valid reward name.")
             return
 
+        display_name = get_display_name(user_id, update.effective_user.full_name)
         await update.message.reply_text(f"Congratulations! You have claimed your free reward: <b>{reward['name']}</b>!", parse_mode='HTML')
 
         admins = await context.bot.get_chat_administrators(update.effective_chat.id)
@@ -1120,7 +1186,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_message(
                     chat_id=admin.user.id,
-                    text=f"User @{update.effective_user.username or update.effective_user.full_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) claimed the free reward: '{reward['name']}'."
+                    text=f"User {display_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) claimed the free reward: '{reward['name']}'."
                 )
             except Exception as e:
                 print(f"Failed to notify admin {admin.user.id} about free reward: {e}")
@@ -1146,13 +1212,14 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         state = context.user_data[ASK_TASK_DESCRIPTION]
         task_description = update.message.text.strip()
         group_id = state['group_id']
-        challenger = update.effective_user
+        challenger_user = update.effective_user
+        challenger_name = get_display_name(challenger_user.id, challenger_user.full_name)
         target_username = state['target_username']
 
         # Announce in group
         await context.bot.send_message(
             chat_id=group_id,
-            text=f"{challenger.mention_html()} has a task for {target_username}: {task_description}",
+            text=f"{challenger_name} has a task for {target_username}: {task_description}",
             parse_mode='HTML'
         )
 
@@ -1172,14 +1239,17 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         help_data = context.user_data.get('admin_help', {})
         help_data['reason'] = reason
         user = message.from_user
+        display_name = get_display_name(user.id, user.full_name)
         chat = message.chat
         replied_message = help_data.get('replied_message')
         help_text = f"🚨 <b>Admin Help Request</b> 🚨\n" \
-                    f"<b>User:</b> {user.mention_html()} (ID: {user.id})\n" \
+                    f"<b>User:</b> {display_name} (ID: {user.id})\n" \
                     f"<b>Group:</b> {getattr(chat, 'title', chat.id)} (ID: {chat.id})\n" \
                     f"<b>Reason:</b> {reason}\n"
         if replied_message:
-            rep_user = replied_message.get('from', {})
+            rep_user_data = replied_message.get('from', {})
+            rep_user_id = rep_user_data.get('id')
+            rep_user_name = get_display_name(rep_user_id, rep_user_data.get('username', 'Unknown'))
             rep_text = replied_message.get('text', '') or replied_message.get('caption', '')
             has_photo = 'photo' in replied_message and replied_message['photo']
             has_video = 'video' in replied_message and replied_message['video']
@@ -1191,7 +1261,7 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             elif has_voice and not rep_text and not has_photo and not has_video:
                 help_text += f"<b>Replied to:</b> [media: voice note only]\n"
             else:
-                help_text += f"<b>Replied to:</b> {rep_user.get('username', 'Unknown')} (ID: {rep_user.get('id', 'N/A')})\n"
+                help_text += f"<b>Replied to:</b> {rep_user_name} (ID: {rep_user_id})\n"
                 if rep_text:
                     help_text += f"<b>Message:</b> {rep_text}\n"
         admins = await context.bot.get_chat_administrators(chat.id)
@@ -1321,10 +1391,10 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please use this command as a reply to the user you want to challenge.")
         return
 
-    challenger = update.effective_user
-    opponent = update.message.reply_to_message.from_user
+    challenger_user = update.effective_user
+    opponent_user = update.message.reply_to_message.from_user
 
-    if challenger.id == opponent.id:
+    if challenger_user.id == opponent_user.id:
         await update.message.reply_text("You cannot challenge yourself.")
         return
 
@@ -1333,8 +1403,8 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     games_data[game_id] = {
         "group_id": update.effective_chat.id,
-        "challenger_id": challenger.id,
-        "opponent_id": opponent.id,
+        "challenger_id": challenger_user.id,
+        "opponent_id": opponent_user.id,
         "game_type": None,
         "challenger_stake": None,
         "opponent_stake": None,
@@ -1342,8 +1412,11 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     save_games_data(games_data)
 
+    challenger_name = get_display_name(challenger_user.id, challenger_user.full_name)
+    opponent_name = get_display_name(opponent_user.id, opponent_user.full_name)
+
     await update.message.reply_text(
-        f"{challenger.mention_html()} has challenged {opponent.mention_html()}! {challenger.mention_html()}, please check your private messages to set up the game.",
+        f"{challenger_name} has challenged {opponent_name}! {challenger_name}, please check your private messages to set up the game.",
         parse_mode='HTML'
     )
 
@@ -1351,12 +1424,12 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Start Game Setup", callback_data=f"start_game_setup_{game_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.send_message(
-            chat_id=challenger.id,
+            chat_id=challenger_user.id,
             text="Let's set up your game! Click the button below to begin.",
             reply_markup=reply_markup
         )
     except Exception as e:
-        print(f"Failed to send private message to user {challenger.id}: {e}")
+        print(f"Failed to send private message to user {challenger_user.id}: {e}")
         await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
 
 @command_handler_wrapper(admin_only=True)
@@ -1405,17 +1478,19 @@ async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
     winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+    loser_name = get_display_name(loser_id, loser_member.user.full_name)
+    winner_name = get_display_name(winner_id, winner_member.user.full_name)
 
     if loser_stake['type'] == 'points':
         await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
         await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
         await context.bot.send_message(
             game['group_id'],
-            f"{loser_member.user.mention_html()} is a loser! They lost {loser_stake['value']} points to {winner_member.user.mention_html()}.",
+            f"{loser_name} is a loser! They lost {loser_stake['value']} points to {winner_name}.",
             parse_mode='HTML'
         )
     else:
-        caption = f"{loser_member.user.mention_html()} is a loser! This was their stake."
+        caption = f"{loser_name} is a loser! This was their stake."
         if loser_stake['type'] == 'photo':
             await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
         elif loser_stake['type'] == 'video':
@@ -1600,9 +1675,11 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
     # If used as a reply, show replied-to user's points
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
-        target_id = update.message.reply_to_message.from_user.id
+        target_user = update.message.reply_to_message.from_user
+        target_id = target_user.id
         points = get_user_points(group_id, target_id)
-        await update.message.reply_text(f"User {update.message.reply_to_message.from_user.full_name} has {points} points.")
+        display_name = get_display_name(target_id, target_user.full_name)
+        await update.message.reply_text(f"{display_name} has {points} points.")
         return
     # If no argument, show own points
     if not context.args:
@@ -1624,8 +1701,11 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target_id:
         await update.message.reply_text(f"Could not resolve user '{arg}'. Please reply to a user's message or provide a valid user ID.")
         return
+
+    target_member = await context.bot.get_chat_member(group_id, target_id)
+    display_name = get_display_name(target_id, target_member.user.full_name)
     points = get_user_points(group_id, target_id)
-    await update.message.reply_text(f"User {arg} has {points} points.")
+    await update.message.reply_text(f"{display_name} has {points} points.")
 
 @command_handler_wrapper(admin_only=True)
 async def top5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1644,12 +1724,10 @@ async def top5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for idx, (uid, pts) in enumerate(top5, 1):
         try:
             member = await context.bot.get_chat_member(update.effective_chat.id, int(uid))
-            name = member.user.full_name
-            uname = f" (@{member.user.username})" if member.user.username else ""
+            name = get_display_name(int(uid), member.user.full_name)
         except Exception:
             name = f"User {uid}"
-            uname = ""
-        lines.append(f"<b>{idx}.</b> <i>{name}{uname}</i> — <b>{pts} points</b> {'🏆' if idx==1 else ''}")
+        lines.append(f"<b>{idx}.</b> <i>{name}</i> — <b>{pts} points</b> {'🏆' if idx==1 else ''}")
     msg = '\n'.join(lines)
     await update.message.reply_text(msg, parse_mode='HTML')
 
@@ -1829,53 +1907,51 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 @command_handler_wrapper(admin_only=False)
 async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Lists all available commands, showing which are admin-only and which are disabled.
-    Also updates user activity for inactivity tracking.
+    Dynamically lists all available commands based on user's admin status and disabled commands.
     """
     if update.effective_chat.type == "private":
-        await update.message.reply_text("This command can only be used in group chats.")
+        await update.message.reply_text("Please use this command in a group to see the available commands for that group.")
         return
-    # Update user activity for inactivity tracking
-    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
-    # Define static commands and their admin status
-    static_commands = [
-        ('/start', False),
-        ('/help', False),
-        ('/beowned', False),
-        ('/command', False),
-        ('/remove', True),
-        ('/admin', False),
-        ('/link', True),
-        ('/inactive', True),
-    ]
+
     group_id = str(update.effective_chat.id)
-    disabled = load_disabled_commands()
-    disabled_cmds = set(disabled.get(group_id, []))
-    print(f"[DEBUG] Disabled commands for group {group_id}: {disabled_cmds}")
-    # Only show /start and /help in private chat, not in group
-    if update.effective_chat.type == "private":
-        everyone_cmds = [cmd for cmd, is_admin in static_commands if not is_admin and cmd.lstrip('/') not in disabled_cmds]
-        msg = (
-            '<b>Commands for everyone:</b>\n' + ('\n'.join(everyone_cmds) if everyone_cmds else 'None')
-        )
-        await update.message.reply_text(msg, parse_mode='HTML')
-        return
-    else:
-        everyone_cmds = [cmd for cmd, is_admin in static_commands if not is_admin and cmd.lstrip('/') not in disabled_cmds and cmd not in ['/start', '/help']]
-    # Check if user is admin in the group
+    disabled_cmds = set(load_disabled_commands().get(group_id, []))
+
     member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
     is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    admin_only_cmds = [cmd for cmd, is_admin in static_commands if is_admin and cmd.lstrip('/') not in disabled_cmds]
-    # Load hashtag commands (admin only)
-    data = load_hashtag_data()
-    hashtag_cmds = [f'/{tag}' for tag in data.keys()]
-    admin_only_cmds += hashtag_cmds
+
+    everyone_cmds = []
+    admin_only_cmds = []
+
+    # Static commands from COMMAND_MAP
+    for cmd, info in sorted(COMMAND_MAP.items()):
+        if cmd in ['start', 'help']:  # Don't show these in the group list
+            continue
+
+        is_disabled = cmd in disabled_cmds
+        display_cmd = f"/{cmd}"
+        if is_disabled:
+            display_cmd += " (disabled)"
+
+        if info['is_admin']:
+            if is_admin_user:  # Admins see all admin commands
+                admin_only_cmds.append(display_cmd)
+        else:  # Everyone commands
+            if not is_disabled:
+                everyone_cmds.append(display_cmd)
+            elif is_admin_user:  # Admins also see disabled everyone commands
+                everyone_cmds.append(display_cmd)
+
+    # Dynamic hashtag commands (always admin-only)
+    if is_admin_user:
+        hashtag_data = load_hashtag_data()
+        for tag in sorted(hashtag_data.keys()):
+            admin_only_cmds.append(f"/{tag}")
+
     msg = '<b>Commands for everyone:</b>\n' + ('\n'.join(everyone_cmds) if everyone_cmds else 'None')
     if is_admin_user:
         msg += '\n\n<b>Commands for admins only:</b>\n' + ('\n'.join(admin_only_cmds) if admin_only_cmds else 'None')
+
     await update.message.reply_text(msg, parse_mode='HTML')
-    print(f"[DEBUG] Sent command list to user {update.effective_user.id}")
 
 # Persistent storage for disabled commands per group
 DISABLED_COMMANDS_FILE = 'disabled_commands.json'
@@ -2036,27 +2112,88 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #Help command
 @command_handler_wrapper(admin_only=False)
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Update user activity for inactivity tracking
-    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
+    """
+    Shows the interactive help menu.
+    """
     if update.effective_chat.type != "private":
-        await update.message.reply_text("Please message me in private to use /help.")
-        try:
-            await context.bot.send_message(
-                chat_id=update.effective_user.id,
-                text='I exist to keep you fags in line! If you have issues in one of our groups contact @Lionspridechatbot or use the @admin function directly in our groups.'
-            )
-        except Exception:
-            pass
+        await update.message.reply_text("Please use the /help command in a private chat with me for a better experience.")
         return
-    # Check if disabled in this group (should never trigger in private)
-    group_id = str(update.effective_chat.id)
-    disabled = load_disabled_commands()
-    if 'help' in disabled.get(group_id, []):
+
+    keyboard = [
+        [InlineKeyboardButton("General Commands", callback_data='help_general')],
+        [InlineKeyboardButton("Game Commands", callback_data='help_games')],
+        [InlineKeyboardButton("Point System", callback_data='help_points')],
+        [InlineKeyboardButton("Admin Commands", callback_data='help_admin')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Welcome to the help menu! Please choose a category:",
+        reply_markup=reply_markup
+    )
+
+async def help_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all interactions with the interactive help menu."""
+    query = update.callback_query
+    await query.answer()
+
+    topic = query.data
+
+    text = ""
+    keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data='help_back')]]
+
+    if topic == 'help_general':
+        text = """
+<b>General Commands</b>
+- /help: Shows this help menu.
+- /command: Lists all available commands in the current group.
+- /beowned: Information on how to be owned.
+- /admin: Request help from admins in a group.
+        """
+    elif topic == 'help_games':
+        text = """
+<b>Game Commands</b>
+- /newgame (reply to user): Challenge someone to a game (Dice, Connect Four, Battleship).
+- /loser (admin only): Declare a user as the loser of a game.
+- /cleangames (admin only): Clean up old game data.
+- /chance: Play a daily game of chance for points or other outcomes.
+        """
+    elif topic == 'help_points':
+        text = """
+<b>Point & Reward System</b>
+- /point: Check your own points.
+- /reward: View and buy available rewards.
+- /top5 (admin only): See the top 5 users with the most points.
+- /addpoints (admin only): Add points to a user.
+- /removepoints (admin only): Remove points from a user.
+- /addreward (admin only): Add a new reward.
+- /removereward (admin only): Remove a reward.
+- /punishment (admin only): List punishments for low points.
+- /addpunishment (admin only): Add a new punishment.
+- /removepunishment (admin only): Remove a punishment.
+        """
+    elif topic == 'help_admin':
+        text = """
+<b>Admin Commands</b>
+This bot has many admin commands for managing games, points, and users.
+Due to Telegram limitations, I cannot know if you are an admin in a private chat.
+
+To see the full list of admin commands available to you in a specific group, please go to that group and use the `/command` command.
+        """
+    elif topic == 'help_back':
+        main_menu_keyboard = [
+            [InlineKeyboardButton("General Commands", callback_data='help_general')],
+            [InlineKeyboardButton("Game Commands", callback_data='help_games')],
+            [InlineKeyboardButton("Point System", callback_data='help_points')],
+            [InlineKeyboardButton("Admin Commands", callback_data='help_admin')],
+        ]
+        await query.edit_message_text(
+            "Welcome to the help menu! Please choose a category:",
+            reply_markup=InlineKeyboardMarkup(main_menu_keyboard)
+        )
         return
-    await update.message.reply_text('I exist to keep you fags in line!'
-                                    ' '
-                                    'If you have issues in one of our groups contact @Lionspridechatbot or use the @admin function directly in our groups.')
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML', disable_web_page_preview=True)
 
 #BeOwned command
 @command_handler_wrapper(admin_only=False)
@@ -2379,13 +2516,14 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         stake_type = game['challenger_stake']['type']
         stake_value = game['challenger_stake']['value']
 
-    opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+    opponent_member = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+    opponent_name = get_display_name(opponent_member.user.id, opponent_member.user.full_name)
 
     confirmation_text = (
         f"<b>Game Setup Confirmation</b>\n\n"
         f"<b>Game:</b> {game['game_type']}\n"
         f"<b>Your Stake:</b> {stake_value} {stake_type}\n"
-        f"<b>Opponent:</b> {opponent.user.mention_html()}\n\n"
+        f"<b>Opponent:</b> {opponent_name}\n\n"
         f"Is this correct?"
     )
 
@@ -2454,13 +2592,15 @@ async def confirm_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     game['status'] = 'pending_opponent_acceptance'
     save_games_data(games_data)
 
-    challenger = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
-    opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+    challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
+    opponent_member = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+    challenger_name = get_display_name(challenger_member.user.id, challenger_member.user.full_name)
+    opponent_name = get_display_name(opponent_member.user.id, opponent_member.user.full_name)
 
     challenge_text = (
         f"🚨 <b>New Challenge!</b> 🚨\n\n"
-        f"{challenger.user.mention_html()} has challenged {opponent.user.mention_html()} to a game of {game['game_type']}!\n\n"
-        f"{opponent.user.mention_html()}, do you accept?"
+        f"{challenger_name} has challenged {opponent_name} to a game of {game['game_type']}!\n\n"
+        f"{opponent_name}, do you accept?"
     )
 
     keyboard = [
@@ -2513,8 +2653,9 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_game['last_roll'] = {'user_id': user_id, 'value': update.message.dice.value}
         save_games_data(games_data)
         other_player_id = active_game['challenger_id'] if user_id == active_game['opponent_id'] else active_game['opponent_id']
-        other_player = await context.bot.get_chat_member(active_game['group_id'], other_player_id)
-        await update.message.reply_text(f"You rolled a {update.message.dice.value}. Waiting for {other_player.user.mention_html()} to roll.", parse_mode='HTML')
+        other_player_member = await context.bot.get_chat_member(active_game['group_id'], other_player_id)
+        other_player_name = get_display_name(other_player_id, other_player_member.user.full_name)
+        await update.message.reply_text(f"You rolled a {update.message.dice.value}. Waiting for {other_player_name} to roll.", parse_mode='HTML')
         return
 
     if last_roll['user_id'] == user_id:
@@ -2544,9 +2685,10 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_game['opponent_score'] += 1
 
     winner_member = await context.bot.get_chat_member(active_game['group_id'], winner_id)
+    winner_name = get_display_name(winner_id, winner_member.user.full_name)
     await context.bot.send_message(
         chat_id=active_game['group_id'],
-        text=f"{winner_member.user.mention_html()} wins round {active_game['current_round']}!\n"
+        text=f"{winner_name} wins round {active_game['current_round']}!\n"
              f"Score: {active_game['challenger_score']} - {active_game['opponent_score']}",
         parse_mode='HTML'
     )
@@ -2643,20 +2785,22 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
         challenger_id = game['challenger_id']
         challenger_stake = game['challenger_stake']
 
+        challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
+        challenger_name = get_display_name(challenger_id, challenger_member.user.full_name)
+
         await context.bot.send_message(
             chat_id=challenger_id,
-            text=f"Your challenge was refused."
+            text=f"Your challenge was refused by {get_display_name(update.effective_user.id, update.effective_user.full_name)}."
         )
 
-        challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
         if challenger_stake['type'] == 'points':
             await context.bot.send_message(
                 game['group_id'],
-                f"{challenger_member.user.mention_html()} is a loser for being refused! They lost {challenger_stake['value']} points.",
+                f"{challenger_name} is a loser for being refused! They lost {challenger_stake['value']} points.",
                 parse_mode='HTML'
             )
         else:
-            caption = f"{challenger_member.user.mention_html()} is a loser for being refused! This was their stake."
+            caption = f"{challenger_name} is a loser for being refused! This was their stake."
             if challenger_stake['type'] == 'photo':
                 await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
             elif challenger_stake['type'] == 'video':
@@ -2743,20 +2887,38 @@ async def command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.args = message_text.split()[1:]
 
-    handler = COMMAND_MAP.get(command)
-    if handler:
-        await handler(update, context)
+    command_info = COMMAND_MAP.get(command)
+    if command_info:
+        await command_info['function'](update, context)
+    else:
+        # Fallback to dynamic hashtag commands for any unknown command
+        await dynamic_hashtag_command(update, context)
 
 COMMAND_MAP = {
-    'start': start_command, 'help': help_command, 'beowned': beowned_command,
-    'command': command_list_command, 'remove': remove_command, 'admin': admin_command,
-    'link': link_command, 'inactive': inactive_command, 'addreward': addreward_command,
-    'removereward': removereward_command, 'addpunishment': addpunishment_command,
-    'removepunishment': removepunishment_command, 'punishment': punishment_command,
-    'newgame': newgame_command, 'loser': loser_command, 'cleangames': cleangames_command,
-    'chance': chance_command, 'reward': reward_command, 'cancel': cancel_command,
-    'addpoints': addpoints_command, 'removepoints': removepoints_command,
-    'point': point_command, 'top5': top5_command,
+    'start': {'function': start_command, 'is_admin': False},
+    'help': {'function': help_command, 'is_admin': False},
+    'beowned': {'function': beowned_command, 'is_admin': False},
+    'command': {'function': command_list_command, 'is_admin': False},
+    'remove': {'function': remove_command, 'is_admin': True},
+    'admin': {'function': admin_command, 'is_admin': False},
+    'link': {'function': link_command, 'is_admin': True},
+    'inactive': {'function': inactive_command, 'is_admin': True},
+    'addreward': {'function': addreward_command, 'is_admin': True},
+    'removereward': {'function': removereward_command, 'is_admin': True},
+    'addpunishment': {'function': addpunishment_command, 'is_admin': True},
+    'removepunishment': {'function': removepunishment_command, 'is_admin': True},
+    'punishment': {'function': punishment_command, 'is_admin': True},
+    'newgame': {'function': newgame_command, 'is_admin': False},
+    'loser': {'function': loser_command, 'is_admin': True},
+    'cleangames': {'function': cleangames_command, 'is_admin': True},
+    'chance': {'function': chance_command, 'is_admin': False},
+    'reward': {'function': reward_command, 'is_admin': False},
+    'cancel': {'function': cancel_command, 'is_admin': False},
+    'addpoints': {'function': addpoints_command, 'is_admin': True},
+    'removepoints': {'function': removepoints_command, 'is_admin': True},
+    'point': {'function': point_command, 'is_admin': False}, # Internal admin check
+    'top5': {'function': top5_command, 'is_admin': True},
+    'setnickname': {'function': setnickname_command, 'is_admin': True},
 }
 
 if __name__ == '__main__':
@@ -2812,6 +2974,7 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(connect_four_move_handler, pattern=r'^c4_move_'))
     app.add_handler(CallbackQueryHandler(bs_select_col_handler, pattern=r'^bs_col_'))
     app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack_'))
+    app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
 
     # Add the command router for /, ., and ! prefixes. This replaces all CommandHandlers.
