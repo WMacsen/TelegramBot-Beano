@@ -188,6 +188,15 @@ def get_display_name(user_id: int, full_name: str) -> str:
     nicknames = load_admin_nicknames()
     return nicknames.get(str(user_id), full_name)
 
+def get_capitalized_name(user_id: int, full_name: str) -> str:
+    """
+    Gets the user's display name and capitalizes it correctly for use at the start of a sentence.
+    """
+    name = get_display_name(user_id, full_name)
+    if name == "fag":
+        return "The fag"
+    return name.capitalize()
+
 def is_admin(user_id):
     """Check if the user is an admin or the owner."""
     data = load_admin_data()
@@ -396,6 +405,7 @@ COMMAND_MAP = {
     'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
     'command': {'is_admin': False}, 'remove': {'is_admin': True}, 'admin': {'is_admin': False},
     'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'setnickname': {'is_admin': True},
+    'enable': {'is_admin': True},
 }
 
 @command_handler_wrapper(admin_only=False)
@@ -484,13 +494,40 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tag in COMMAND_MAP:
         group_id = str(update.effective_chat.id)
         disabled = load_disabled_commands()
-        disabled.setdefault(group_id, set())
-        # Convert to list for JSON
-        disabled[group_id] = list(set(disabled.get(group_id, [])) | {tag})
-        save_disabled_commands(disabled)
-        await update.message.reply_text(f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
+        disabled.setdefault(group_id, [])
+        if tag not in disabled[group_id]:
+            disabled[group_id].append(tag)
+            save_disabled_commands(disabled)
+            await update.message.reply_text(f"Command /{tag} has been disabled in this group. Admins can re-enable it with /enable {tag}.")
+        else:
+            await update.message.reply_text(f"Command /{tag} is already disabled.")
         return
     await update.message.reply_text(f"No such dynamic or static command: /{tag}")
+
+@command_handler_wrapper(admin_only=True)
+async def enable_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /enable <command> (admin only): Enables a previously disabled command in the group.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /enable <command>")
+        return
+
+    command_to_enable = context.args[0].lstrip('/').lower()
+    group_id = str(update.effective_chat.id)
+    disabled = load_disabled_commands()
+
+    if group_id in disabled and command_to_enable in disabled[group_id]:
+        disabled[group_id].remove(command_to_enable)
+        if not disabled[group_id]:  # Remove group key if list is empty
+            del disabled[group_id]
+        save_disabled_commands(disabled)
+        await update.message.reply_text(f"Command /{command_to_enable} has been enabled in this group.")
+    else:
+        await update.message.reply_text(f"Command /{command_to_enable} is not currently disabled.")
 
 # Admin help request conversation state
 ADMIN_HELP_STATE = 'awaiting_admin_help_reason'
@@ -527,6 +564,78 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     await message.reply_text("Please describe the reason you need admin help. Your request will be sent to all group admins.")
     context.user_data[ADMIN_HELP_STATE] = True
+
+
+async def admin_help_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the user's response after using /admin."""
+    if ADMIN_HELP_STATE not in context.user_data:
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    reason = message.text
+    help_data = context.user_data.get('admin_help', {})
+    user_id = help_data.get('user_id')
+    user_full_name = update.effective_user.full_name
+    display_name = get_display_name(user_id, user_full_name)
+    chat_id = help_data.get('chat_id')
+    chat_title = help_data.get('chat_title')
+    replied_message = help_data.get('replied_message')
+
+    help_text = (
+        f"🚨 <b>Admin Help Request</b> 🚨\n"
+        f"<b>User:</b> {display_name} (ID: {user_id})\n"
+        f"<b>Group:</b> {chat_title} (ID: {chat_id})\n"
+        f"<b>Reason:</b> {html.escape(reason)}\n"
+    )
+
+    if replied_message:
+        rep_user_data = replied_message.get('from', {})
+        rep_user_id = rep_user_data.get('id')
+        rep_user_name = get_display_name(rep_user_id, rep_user_data.get('username', 'Unknown'))
+        rep_text = replied_message.get('text', '') or replied_message.get('caption', '')
+        help_text += f"<b>Replied to:</b> {rep_user_name} (ID: {rep_user_id})\n"
+        if rep_text:
+            help_text += f"<b>Message:</b> {html.escape(rep_text)}\n"
+
+    admins = await context.bot.get_chat_administrators(chat_id)
+    for admin in admins:
+        try:
+            await context.bot.send_message(
+                chat_id=admin.user.id,
+                text=help_text,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            if replied_message:
+                if 'photo' in replied_message and replied_message['photo']:
+                    file_id = replied_message['photo'][-1]['file_id']
+                    await context.bot.send_photo(chat_id=admin.user.id, photo=file_id, caption="[Forwarded from help request]")
+                if 'video' in replied_message and replied_message['video']:
+                    file_id = replied_message['video']['file_id']
+                    await context.bot.send_video(chat_id=admin.user.id, video=file_id, caption="[Forwarded from help request]")
+                if 'voice' in replied_message and replied_message['voice']:
+                    file_id = replied_message['voice']['file_id']
+                    await context.bot.send_voice(chat_id=admin.user.id, voice=file_id, caption="[Forwarded from help request]")
+        except Exception:
+            logger.warning(f"Failed to notify admin {admin.user.id} in help request.")
+
+    sent_message = await message.reply_text("Your help request has been sent to all group admins.")
+
+    # Schedule the confirmation message for deletion after 30 seconds
+    context.job_queue.run_once(
+        delete_message_callback,
+        30,
+        chat_id=sent_message.chat_id,
+        data=sent_message.message_id,
+        name=f"delete_{sent_message.chat_id}_{sent_message.message_id}"
+    )
+
+    # Clean up the conversation state
+    context.user_data.pop(ADMIN_HELP_STATE, None)
+    context.user_data.pop('admin_help', None)
 
 
 @command_handler_wrapper(admin_only=True)
@@ -721,6 +830,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # =============================
+# Timed Message Deletion
+# =============================
+async def delete_message_callback(context: CallbackContext):
+    """Deletes the message specified in the job context."""
+    try:
+        await context.bot.delete_message(chat_id=context.job.chat_id, message_id=context.job.data)
+        logger.debug(f"Deleted scheduled message {context.job.data} in chat {context.job.chat_id}")
+    except Exception as e:
+        logger.warning(f"Failed to delete scheduled message: {e}")
+
+
+# =============================
 # /inactive command and auto-kick logic
 # =============================
 @command_handler_wrapper(admin_only=True)
@@ -828,8 +949,10 @@ if __name__ == '__main__':
     add_command(app, 'link', link_command)
     add_command(app, 'inactive', inactive_command)
     add_command(app, 'setnickname', setnickname_command)
+    add_command(app, 'enable', enable_command)
 
     # Add the conversation handler with a high priority
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_help_conversation_handler), group=-1)
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
 
     # Fallback handler for dynamic hashtag commands.
