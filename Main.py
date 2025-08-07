@@ -441,15 +441,6 @@ def save_cooldowns(data):
     with open(CHANCE_COOLDOWNS_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_last_played(user_id):
-    cooldowns = load_cooldowns()
-    return cooldowns.get(str(user_id))
-
-def set_last_played(user_id):
-    cooldowns = load_cooldowns()
-    cooldowns[str(user_id)] = time.time()
-    save_cooldowns(cooldowns)
-
 def get_chance_outcome():
     """
     Returns a random outcome for the chance game based on weighted probabilities.
@@ -536,6 +527,14 @@ def check_connect_four_draw(board: list) -> bool:
     """Check for a draw in Connect Four."""
     return all(cell != 0 for cell in board[0])
 
+async def send_and_track_message(context, chat_id, game_id, text, **kwargs):
+    """Sends a message and tracks it for later deletion."""
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    games_data = load_games_data()
+    if game_id in games_data:
+        games_data[game_id].setdefault('messages_to_delete', []).append({'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
+        save_games_data(games_data)
+    return sent_message
 
 async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, loser_id: int):
     """Handles the end of a game, distributing stakes."""
@@ -580,6 +579,15 @@ async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, win
             await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
 
     game['status'] = 'complete'
+
+    # Delete messages
+    for msg in game.get('messages_to_delete', []):
+        try:
+            await context.bot.delete_message(chat_id=msg['chat_id'], message_id=msg['message_id'])
+        except Exception:
+            pass # Ignore errors if message is already deleted or not found
+    game['messages_to_delete'] = [] # Clear the list
+
     save_games_data(games_data)
 
 
@@ -712,9 +720,11 @@ async def bs_start_game_in_group(context: ContextTypes.DEFAULT_TYPE, game_id: st
     challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
     challenger_name = get_display_name(challenger_id, challenger_member.user.full_name)
 
-    await context.bot.send_message(
-        chat_id=game['group_id'],
-        text=f"All ships have been placed! The battle begins now.\n\nIt's {challenger_name}'s turn to attack. Check your private messages!",
+    await send_and_track_message(
+        context,
+        game['group_id'],
+        game_id,
+        f"All ships have been placed! The battle begins now.\n\nIt's {challenger_name}'s turn to attack. Check your private messages!",
         parse_mode='HTML'
     )
     await bs_send_turn_message(context, game_id)
@@ -748,9 +758,13 @@ async def bs_send_turn_message(context: ContextTypes.DEFAULT_TYPE, game_id: str,
             reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2'
         )
     else:
-        await context.bot.send_message(
-            chat_id=int(player_id_str), text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2'
+        await send_and_track_message(
+            context,
+            int(player_id_str),
+            game_id,
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='MarkdownV2'
         )
 
 async def bs_select_col_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -838,9 +852,11 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Failed to send attack result to victim: {e}")
 
-    await context.bot.send_message(
-        chat_id=game['group_id'],
-        text=f"It is now {opponent_name}'s turn.",
+    await send_and_track_message(
+        context,
+        game['group_id'],
+        game_id,
+        f"It is now {opponent_name}'s turn.",
         parse_mode='HTML'
     )
 
@@ -921,7 +937,7 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
         ship_coords.append((r, c))
 
     if not valid:
-        await update.message.reply_text("Invalid placement: ship is out of bounds or overlaps another ship. Try again.")
+        await send_and_track_message(context, update.effective_chat.id, game_id, "Invalid placement: ship is out of bounds or overlaps another ship. Try again.")
         return BS_AWAITING_PLACEMENT
 
     for r, c in ship_coords:
@@ -937,7 +953,7 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
         game['placement_complete'][user_id] = True
         save_games_data(games_data)
 
-        await update.message.reply_text(f"Final board:\n{board_text}\nAll ships placed! Waiting for opponent...", parse_mode='MarkdownV2')
+        await send_and_track_message(context, update.effective_chat.id, game_id, f"Final board:\n{board_text}\nAll ships placed! Waiting for opponent...", parse_mode='MarkdownV2')
 
         opponent_id = str(game['opponent_id'] if user_id == str(game['challenger_id']) else game['challenger_id'])
         if game.get('placement_complete', {}).get(opponent_id):
@@ -947,7 +963,10 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         next_ship_name = context.user_data['bs_ships_to_place'][0]
         next_ship_size = BATTLESHIP_SHIPS[next_ship_name]
-        await update.message.reply_text(
+        await send_and_track_message(
+            context,
+            update.effective_chat.id,
+            game_id,
             f"Your board:\n{board_text}\n"
             f"Place your {next_ship_name} ({next_ship_size} spaces). Format: `A1 H` or `A1 V`.",
             parse_mode='MarkdownV2'
@@ -1384,26 +1403,31 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "game_type": None,
         "challenger_stake": None,
         "opponent_stake": None,
-        "status": "pending_game_selection"
+        "status": "pending_game_selection",
+        "messages_to_delete": []
     }
     save_games_data(games_data)
 
     challenger_name = get_display_name(challenger_user.id, challenger_user.full_name)
     opponent_name = get_display_name(opponent_user.id, opponent_user.full_name)
 
-    await update.message.reply_text(
+    sent_message = await update.message.reply_text(
         f"{challenger_name} has challenged {opponent_name}! {challenger_name}, please check your private messages to set up the game.",
         parse_mode='HTML'
     )
+    games_data[game_id]['messages_to_delete'].append({'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
+    save_games_data(games_data)
 
     try:
         keyboard = [[InlineKeyboardButton("Start Game Setup", callback_data=f"start_game_setup_{game_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
+        sent_message = await context.bot.send_message(
             chat_id=challenger_user.id,
             text="Let's set up your game! Click the button below to begin.",
             reply_markup=reply_markup
         )
+        games_data[game_id]['messages_to_delete'].append({'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
+        save_games_data(games_data)
     except Exception:
         logger.exception(f"Failed to send private message to user {challenger_user.id}")
         await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
@@ -1485,24 +1509,37 @@ async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game['status'] = 'complete'
     save_games_data(games_data)
 
+from datetime import datetime
+
 @command_handler_wrapper(admin_only=False)
 async def chance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /chance (once per day): Play a game of chance for a random outcome.
+    /chance (3 times per day): Play a game of chance for a random outcome.
     """
-    user_id = update.effective_user.id
-    last_played = get_last_played(user_id)
+    user_id = str(update.effective_user.id)
+    cooldowns = load_cooldowns()
+    today = datetime.utcnow().strftime('%Y-%m-%d')
 
-    if last_played and (time.time() - last_played) < 86400: # 24 hours
-        remaining_time = 86400 - (time.time() - last_played)
-        hours = int(remaining_time // 3600)
-        minutes = int((remaining_time % 3600) // 60)
-        await update.message.reply_text(f"You have already played today. Please wait {hours}h {minutes}m to play again.")
+    user_data = cooldowns.get(user_id, {"count": 0, "date": ""})
+
+    if user_data["date"] == today and user_data["count"] >= 3:
+        await update.message.reply_text("You have already played 3 times today. Please wait until tomorrow.")
         return
 
-    await update.message.reply_text("You spin the wheel of fortune...")
-    outcome = get_chance_outcome()
+    # If it's a new day, reset the counter
+    if user_data["date"] != today:
+        user_data["date"] = today
+        user_data["count"] = 0
 
+    # Increment play count and save
+    user_data["count"] += 1
+    cooldowns[user_id] = user_data
+    save_cooldowns(cooldowns)
+
+    plays_left = 3 - user_data['count']
+    await update.message.reply_text(f"You spin the wheel of fortune... (You have {plays_left} {'play' if plays_left == 1 else 'plays'} left today)")
+
+    outcome = get_chance_outcome()
     group_id = str(update.effective_chat.id)
 
     if outcome == "plus_50":
@@ -1525,7 +1562,6 @@ async def chance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         points = get_user_points(group_id, user_id)
         await add_user_points(group_id, user_id, points, context)
         await update.message.reply_text("Jackpot! Your points have been doubled!")
-
     elif outcome == "free_reward":
         rewards = get_rewards_list(group_id)
         msg = "<b>You won a free reward!</b>\nChoose one of the following:\n"
@@ -1537,8 +1573,6 @@ async def chance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif outcome == "ask_task":
         await update.message.reply_text("You have won the right to ask a simple task from any of the other boys. Who would you like to ask? (Please provide their @username)")
         context.user_data[ASK_TASK_TARGET] = {'group_id': group_id}
-
-    set_last_played(user_id)
 
 @command_handler_wrapper(admin_only=True)
 async def cleangames_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2058,7 +2092,9 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
 
         user_points = get_user_points(group_id, user_id)
         if user_points < points:
-            await update.message.reply_text(f"You don't have enough points. You have {user_points}, but you tried to stake {points}. Please enter a valid amount.")
+            sent_message = await update.message.reply_text(f"You don't have enough points. You have {user_points}, but you tried to stake {points}. Please enter a valid amount.")
+            games_data[game_id]['messages_to_delete'].append({'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
+            save_games_data(games_data)
             return STAKE_SUBMISSION_POINTS
 
         if context.user_data.get('player_role') == 'opponent':
@@ -2087,9 +2123,11 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
             if game['game_type'] == 'game_connect_four':
                 challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
                 board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
-                await context.bot.send_message(
-                    chat_id=game['group_id'],
-                    text=f"<b>Connect Four!</b>\n\n{board_text}\nIt's {challenger_member.user.mention_html()}'s turn.",
+                await send_and_track_message(
+                    context,
+                    game['group_id'],
+                    game_id,
+                    f"<b>Connect Four!</b>\n\n{board_text}\nIt's {challenger_member.user.mention_html()}'s turn.",
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
@@ -2147,7 +2185,11 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
         file_id = message.voice.file_id
         media_type = 'voice'
     else:
-        await update.message.reply_text("That is not a valid media file. Please send a photo, video, or voice note.")
+        sent_message = await update.message.reply_text("That is not a valid media file. Please send a photo, video, or voice note.")
+        game_id = context.user_data['game_id']
+        games_data = load_games_data()
+        games_data[game_id]['messages_to_delete'].append({'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
+        save_games_data(games_data)
         return STAKE_SUBMISSION_MEDIA
 
     game_id = context.user_data['game_id']
@@ -2179,9 +2221,11 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
         if game['game_type'] == 'game_connect_four':
             challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
             board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
-            await context.bot.send_message(
-                chat_id=game['group_id'],
-                text=f"<b>Connect Four!</b>\n\n{board_text}\nIt's {challenger_member.user.mention_html()}'s turn.",
+            await send_and_track_message(
+                context,
+                game['group_id'],
+                game_id,
+                f"<b>Connect Four!</b>\n\n{board_text}\nIt's {challenger_member.user.mention_html()}'s turn.",
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
@@ -2371,11 +2415,11 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         other_player_id = active_game['challenger_id'] if user_id == active_game['opponent_id'] else active_game['opponent_id']
         other_player_member = await context.bot.get_chat_member(active_game['group_id'], other_player_id)
         other_player_name = get_display_name(other_player_id, other_player_member.user.full_name)
-        await update.message.reply_text(f"You rolled a {update.message.dice.value}. Waiting for {other_player_name} to roll.", parse_mode='HTML')
+        await send_and_track_message(context, update.effective_chat.id, active_game_id, f"You rolled a {update.message.dice.value}. Waiting for {other_player_name} to roll.", parse_mode='HTML')
         return
 
     if last_roll['user_id'] == user_id:
-        await update.message.reply_text("It's not your turn to roll.")
+        await send_and_track_message(context, update.effective_chat.id, active_game_id, "It's not your turn to roll.")
         return
 
     # Second roll of a round, determine winner
@@ -2389,7 +2433,7 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif player2_roll > player1_roll:
         winner_id = player2_id
     else: # Tie
-        await update.message.reply_text(f"You both rolled a {player1_roll}. It's a tie! Roll again.")
+        await send_and_track_message(context, update.effective_chat.id, active_game_id, f"You both rolled a {player1_roll}. It's a tie! Roll again.")
         active_game['last_roll'] = None # Reset for re-roll
         save_games_data(games_data)
         return
