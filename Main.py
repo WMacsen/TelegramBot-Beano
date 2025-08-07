@@ -1,18 +1,38 @@
 # =========================
 # Imports and Configuration
 # =========================
+import logging
 import os
 import json
 import re
 import random
+import html
+import traceback
 from typing import Final
 import uuid
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler
 from telegram.constants import ChatMemberStatus
 
+# =========================
+# Logging Configuration
+# =========================
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
+# Suppress noisy library logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+
 # Debug: Print all environment variables at startup
-print("[DEBUG] Environment variables:", os.environ)
+logger.debug(f"Environment variables: {os.environ}")
 
 # Load the Telegram bot token from environment variable
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -62,8 +82,8 @@ def command_handler_wrapper(admin_only=False):
                 if should_delete and chat.type in ['group', 'supergroup']:
                     try:
                         await context.bot.delete_message(chat.id, message_id)
-                    except Exception as e:
-                        print(f"Failed to delete command message {message_id} in chat {chat.id}: {e}")
+                    except Exception:
+                        logger.warning(f"Failed to delete command message {message_id} in chat {chat.id}. Bot may not have delete permissions.")
 
         return wrapper
     return decorator
@@ -126,10 +146,10 @@ def load_admin_data():
             if str(OWNER_ID) not in data.get('admins', []):
                 data['admins'] = list(set(data.get('admins', []) + [str(OWNER_ID)]))
             data['owner'] = str(OWNER_ID)
-            print(f"[DEBUG] Loaded admin data: {data}")
+            logger.debug(f"Loaded admin data: {data}")
             return data
     # Default: owner is admin
-    print("[DEBUG] No admin data file found, using default owner as admin.")
+    logger.debug("No admin data file found, using default owner as admin.")
     return {'owner': str(OWNER_ID), 'admins': [str(OWNER_ID)]}
 
 def save_admin_data(data):
@@ -139,13 +159,13 @@ def save_admin_data(data):
         data['admins'].append(str(data['owner']))
     with open(ADMIN_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"[DEBUG] Saved admin data: {data}")
+    logger.debug(f"Saved admin data: {data}")
 
 def is_owner(user_id):
     """Check if the user is the owner."""
     data = load_admin_data()
     result = str(user_id) == str(data['owner'])
-    print(f"[DEBUG] is_owner({user_id}) -> {result}")
+    logger.debug(f"is_owner({user_id}) -> {result}")
     return result
 
 def get_display_name(user_id: int, full_name: str) -> str:
@@ -162,16 +182,16 @@ def is_admin(user_id):
     """Check if the user is an admin or the owner."""
     data = load_admin_data()
     result = str(user_id) in data['admins'] or str(user_id) == str(data['owner'])
-    print(f"[DEBUG] is_admin({user_id}) -> {result}")
+    logger.debug(f"is_admin({user_id}) -> {result}")
     return result
 
 async def get_user_id_by_username(context, chat_id, username) -> str:
     """Get a user's Telegram ID by their username in a chat."""
     async for member in context.bot.get_chat_administrators(chat_id):
         if member.user.username and member.user.username.lower() == username.lower().lstrip('@'):
-            print(f"[DEBUG] Found user ID {member.user.id} for username {username}")
+            logger.debug(f"Found user ID {member.user.id} for username {username}")
             return str(member.user.id)
-    print(f"[DEBUG] Username {username} not found in chat {chat_id}")
+    logger.debug(f"Username {username} not found in chat {chat_id}")
     return None
 
 # =============================
@@ -182,16 +202,16 @@ def load_hashtag_data():
     if os.path.exists(HASHTAG_DATA_FILE):
         with open(HASHTAG_DATA_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            print(f"[DEBUG] Loaded hashtag data: {list(data.keys())}")
+            logger.debug(f"Loaded hashtag data: {list(data.keys())}")
             return data
-    print("[DEBUG] No hashtag data file found, returning empty dict.")
+    logger.debug("No hashtag data file found, returning empty dict.")
     return {}
 
 def save_hashtag_data(data):
     """Save hashtagged message/media data to file."""
     with open(HASHTAG_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"[DEBUG] Saved hashtag data: {list(data.keys())}")
+    logger.debug(f"Saved hashtag data: {list(data.keys())}")
 
 import asyncio
 import time
@@ -235,7 +255,7 @@ def add_reward(group_id, name, cost):
             return False
     data[group_id].append({"name": name.strip(), "cost": int(cost)})
     save_rewards_data(data)
-    print(f"[DEBUG] Added reward '{name}' with cost {cost} to group {group_id}")
+    logger.debug(f"Added reward '{name}' with cost {cost} to group {group_id}")
     return True
 
 def remove_reward(group_id, name):
@@ -249,7 +269,7 @@ def remove_reward(group_id, name):
     data[group_id] = [r for r in data[group_id] if r["name"].lower() != name.strip().lower()]
     after = len(data[group_id])
     save_rewards_data(data)
-    print(f"[DEBUG] Removed reward '{name}' from group {group_id}")
+    logger.debug(f"Removed reward '{name}' from group {group_id}")
     return before != after
 
 # =============================
@@ -281,7 +301,7 @@ def set_user_points(group_id, user_id, points):
         data[group_id] = {}
     data[group_id][user_id] = points
     save_points_data(data)
-    print(f"[DEBUG] Set points for user {user_id} in group {group_id} to {points}")
+    logger.debug(f"Set points for user {user_id} in group {group_id} to {points}")
 
 async def check_for_punishment(group_id, user_id, context: ContextTypes.DEFAULT_TYPE):
     punishments_data = load_punishments_data()
@@ -320,8 +340,8 @@ async def check_for_punishment(group_id, user_id, context: ContextTypes.DEFAULT_
                             chat_id=admin.user.id,
                             text=f"User {display_name} (ID: {user_id}) in group {chat.title} (ID: {group_id}) triggered punishment '{message}' by falling below {threshold} points."
                         )
-                    except Exception as e:
-                        print(f"Failed to notify admin {admin.user.id} about punishment: {e}")
+                    except Exception:
+                        logger.warning(f"Failed to notify admin {admin.user.id} about punishment.")
 
                 add_triggered_punishment_for_user(group_id, user_id, message)
         else:
@@ -332,7 +352,7 @@ async def check_for_punishment(group_id, user_id, context: ContextTypes.DEFAULT_
 async def add_user_points(group_id, user_id, delta, context: ContextTypes.DEFAULT_TYPE):
     points = get_user_points(group_id, user_id) + delta
     set_user_points(group_id, user_id, points)
-    print(f"[DEBUG] Added {delta} points for user {user_id} in group {group_id} (new total: {points})")
+    logger.debug(f"Added {delta} points for user {user_id} in group {group_id} (new total: {points})")
 
     # Run all punishment checks
     await check_for_punishment(group_id, user_id, context)
@@ -379,8 +399,8 @@ async def check_for_negative_points(group_id, user_id, points, context: ContextT
                     text=f"{user_mention} has dropped into negative points! They have been muted for 24 hours and their points reset to 0.",
                     parse_mode='HTML'
                 )
-            except Exception as e:
-                print(f"Failed to mute user {user_id} for negative points: {e}")
+            except Exception:
+                logger.exception(f"Failed to mute user {user_id} for negative points.")
         else:
             chat = await context.bot.get_chat(group_id)
             admins = await context.bot.get_chat_administrators(group_id)
@@ -396,8 +416,8 @@ async def check_for_negative_points(group_id, user_id, points, context: ContextT
                         text=f"User {user_mention} in group {chat.title} has reached negative points for the third time and requires a special punishment.",
                         parse_mode='HTML'
                     )
-                except Exception as e:
-                    print(f"Failed to notify admin {admin.user.id} about 3rd strike: {e}")
+                except Exception:
+                    logger.warning(f"Failed to notify admin {admin.user.id} about 3rd strike.")
 
 # =============================
 # Chance Game Helpers
@@ -521,7 +541,7 @@ async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, win
         loser_stake = game.get('opponent_stake')
 
     if not loser_stake:
-        print(f"[ERROR] No loser stake found for game {game_id}")
+        logger.error(f"No loser stake found for game {game_id}")
         return
 
     loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
@@ -930,8 +950,8 @@ async def bs_placement_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
                     chat_id=other_player_id,
                     text=f"{update.effective_user.full_name} has cancelled the game during ship placement."
                 )
-            except Exception as e:
-                print(f"Failed to notify other player of cancellation: {e}")
+            except Exception:
+                logger.warning(f"Failed to notify other player {other_player_id} of cancellation.")
 
             # Delete the game
             del games_data[game_id]
@@ -985,7 +1005,7 @@ def add_triggered_punishment_for_user(group_id, user_id, punishment_message: str
     if punishment_message not in data[group_id][user_id]:
         data[group_id][user_id].append(punishment_message)
         save_punishment_status_data(data)
-        print(f"[DEBUG] Added triggered punishment '{punishment_message}' for user {user_id} in group {group_id}")
+        logger.debug(f"Added triggered punishment '{punishment_message}' for user {user_id} in group {group_id}")
 
 def remove_triggered_punishment_for_user(group_id, user_id, punishment_message: str):
     data = load_punishment_status_data()
@@ -995,7 +1015,7 @@ def remove_triggered_punishment_for_user(group_id, user_id, punishment_message: 
         if punishment_message in data[group_id][user_id]:
             data[group_id][user_id].remove(punishment_message)
             save_punishment_status_data(data)
-            print(f"[DEBUG] Removed triggered punishment '{punishment_message}' for user {user_id} in group {group_id}")
+            logger.debug(f"Removed triggered punishment '{punishment_message}' for user {user_id} in group {group_id}")
 
 # =============================
 # Reward System Commands
@@ -1134,8 +1154,8 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     chat_id=admin.user.id,
                     text=f"User {display_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) just bought the reward: '{reward['name']}' for {reward['cost']} points."
                 )
-            except Exception as e:
-                print(f"Failed to notify admin {admin.user.id} about reward purchase: {e}")
+            except Exception:
+                logger.warning(f"Failed to notify admin {admin.user.id} about reward purchase.")
 
         context.user_data.pop(REWARD_STATE, None)
         return
@@ -1188,8 +1208,8 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     chat_id=admin.user.id,
                     text=f"User {display_name} (ID: {user_id}) in group {update.effective_chat.title} (ID: {group_id}) claimed the free reward: '{reward['name']}'."
                 )
-            except Exception as e:
-                print(f"Failed to notify admin {admin.user.id} about free reward: {e}")
+            except Exception:
+                logger.warning(f"Failed to notify admin {admin.user.id} about free reward.")
 
         context.user_data.pop(FREE_REWARD_SELECTION, None)
         return
@@ -1283,8 +1303,8 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     if 'voice' in replied_message and replied_message['voice']:
                         file_id = replied_message['voice']['file_id']
                         await context.bot.send_voice(chat_id=admin.user.id, voice=file_id, caption="[Forwarded from help request]")
-            except Exception as e:
-                print(f"Failed to notify admin {admin.user.id}: {e}")
+            except Exception:
+                logger.warning(f"Failed to notify admin {admin.user.id} in help request.")
         await message.reply_text("Your help request has been sent to all group admins.")
         context.user_data.pop(ADMIN_HELP_STATE, None)
         context.user_data.pop('admin_help', None)
@@ -1428,8 +1448,8 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="Let's set up your game! Click the button below to begin.",
             reply_markup=reply_markup
         )
-    except Exception as e:
-        print(f"Failed to send private message to user {challenger_user.id}: {e}")
+    except Exception:
+        logger.exception(f"Failed to send private message to user {challenger_user.id}")
         await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
 
 @command_handler_wrapper(admin_only=True)
@@ -1765,7 +1785,7 @@ def update_user_activity(user_id, group_id):
         data[group_id] = {}
     data[group_id][user_id] = int(time.time())
     save_activity_data(data)
-    print(f"[DEBUG] Updated activity for user {user_id} in group {group_id}")
+    logger.debug(f"Updated activity for user {user_id} in group {group_id}")
 
 # =============================
 # Hashtag Message Handler
@@ -1778,7 +1798,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
     """
     message = update.message
     if not message:
-        print("[DEBUG] No message found in update for hashtag handler.")
+        logger.debug("No message found in update for hashtag handler.")
         return
     # Update user activity for inactivity tracking
     if message.chat and message.from_user and message.chat.type in ["group", "supergroup"]:
@@ -1786,7 +1806,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
     text = message.text or message.caption or ''
     hashtags = re.findall(r'#(\w+)', text)
     if not hashtags:
-        print("[DEBUG] No hashtags found in message.")
+        logger.debug("No hashtags found in message.")
         return
     # Handle media groups (multiple media sent together)
     if message.media_group_id:
@@ -1818,7 +1838,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
             if cache_key in flush_tasks:
                 flush_tasks[cache_key].cancel()
             flush_tasks[cache_key] = asyncio.create_task(flush_media_group(tag, message.media_group_id, message.chat_id, context))
-            print(f"[DEBUG] Scheduled flush for media group {cache_key}")
+            logger.debug(f"Scheduled flush for media group {cache_key}")
         # Do not send reply here; reply will be sent after flush
         return
     # Handle single media or text
@@ -1843,7 +1863,7 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
         if message.document and message.document.mime_type and message.document.mime_type.startswith('video'):
             entry['videos'].append(message.document.file_id)
         data.setdefault(tag, []).append(entry)
-        print(f"[DEBUG] Saved single message under tag #{tag}")
+        logger.debug(f"Saved single message under tag #{tag}")
     save_hashtag_data(data)
     await message.reply_text(f"Saved under: {', '.join('#'+t for t in hashtags)}")
 
@@ -1872,7 +1892,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     data = load_hashtag_data()
     if command not in data:
         await update.message.reply_text(f"No data found for #{command}.")
-        print(f"[DEBUG] No data found for command: {command}")
+        logger.debug(f"No data found for command: {command}")
         return
     # No admin check: allow all users to use hashtag commands
     found = False
@@ -1891,7 +1911,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
             found = True
     if not found:
         await update.message.reply_text(f"No saved messages or photos for #{command}.")
-        print(f"[DEBUG] No saved messages or media for command: {command}")
+        logger.debug(f"No saved messages or media for command: {command}")
 
 # =============================
 # /command - List all commands
@@ -2073,14 +2093,14 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Confirm in the group chat
                 await update.message.reply_text("I have sent you a single-use invite link in a private message.")
             except Exception as e:
-                print(f"Failed to send private message to admin {user.id}: {e}")
+                logger.error(f"Failed to send private message to admin {user.id}: {e}")
                 await update.message.reply_text(
                     "I couldn't send you a private message. "
                     "Please make sure you have started a chat with me privately first."
                 )
 
         except Exception as e:
-            print(f"Failed to create invite link for chat {chat.id}: {e}")
+            logger.error(f"Failed to create invite link for chat {chat.id}: {e}")
             await update.message.reply_text(
                 "I was unable to create an invite link. "
                 "Please ensure I have the 'Invite Users via Link' permission in this group."
@@ -2229,8 +2249,32 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response:
             await update.message.reply_text(response)
 
-async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f'Update {update} caused error {context.error}')
+import html
+import traceback
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    # Log the error before we do anything else, so we can see it even if something breaks.
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+    # traceback.format_exception returns the usual python message about an exception, but as a
+    # list of strings rather than a single string, so we have to join them together.
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = "".join(tb_list)
+
+    # Build the message with some markup and additional information about what happened.
+    # You might need to add some logic to deal with messages longer than the 4096 character limit.
+    update_str = update.to_dict() if isinstance(update, Update) else str(update)
+    message = (
+        f"An exception was raised while handling an update\n"
+        f"<pre>update = {html.escape(json.dumps(update_str, indent=2, ensure_ascii=False))}</pre>\n\n"
+        f"<pre>context.chat_data = {html.escape(str(context.chat_data))}</pre>\n\n"
+        f"<pre>context.user_data = {html.escape(str(context.user_data))}</pre>\n\n"
+        f"<pre>{html.escape(tb_string)}</pre>"
+    )
+
+    logger.error(message)
+
 
 # =============================
 # Game Setup Conversation
@@ -2338,7 +2382,7 @@ async def stake_type_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the submission of points as a stake."""
-    print("[DEBUG] In stake_submission_points")
+    logger.debug("In stake_submission_points")
     try:
         points = int(update.message.text)
         user_id = update.effective_user.id
@@ -2422,7 +2466,7 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
 
 async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the submission of media as a stake."""
-    print("[DEBUG] In stake_submission_media")
+    logger.debug("In stake_submission_media")
     message = update.message
     file_id = None
     media_type = None
@@ -2500,8 +2544,8 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
                     text="Your Battleship game is ready! It's time to place your ships.",
                     reply_markup=placement_markup
                 )
-            except Exception as e:
-                print(f"Error sending battleship placement message: {e}")
+            except Exception:
+                logger.exception("Error sending battleship placement message")
 
         return ConversationHandler.END
     else:
@@ -2723,16 +2767,18 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
         winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
 
+        loser_name = get_display_name(loser_id, loser_member.user.full_name)
+        winner_name = get_display_name(winner_id, winner_member.user.full_name)
         if loser_stake['type'] == 'points':
             await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
             await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
             await context.bot.send_message(
                 game['group_id'],
-                f"{loser_member.user.mention_html()} is a loser! They lost {loser_stake['value']} points to {winner_member.user.mention_html()}.",
+                f"{loser_name} is a loser! They lost {loser_stake['value']} points to {winner_name}.",
                 parse_mode='HTML'
             )
         else:
-            caption = f"{loser_member.user.mention_html()} is a loser! This was their stake."
+            caption = f"{loser_name} is a loser! This was their stake."
             if loser_stake['type'] == 'photo':
                 await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
             elif loser_stake['type'] == 'video':
@@ -2840,7 +2886,7 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings.pop(group_id, None)
         save_inactive_settings(settings)
         await update.message.reply_text("Inactive user kicking is now disabled in this group.")
-        print(f"[DEBUG] Inactive kicking disabled for group {group_id}")
+        logger.debug(f"Inactive kicking disabled for group {group_id}")
         return
     if not (1 <= days <= 99):
         await update.message.reply_text("Please provide a number of days between 1 and 99.")
@@ -2848,13 +2894,13 @@ async def inactive_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings[group_id] = days
     save_inactive_settings(settings)
     await update.message.reply_text(f"Inactive user kicking is now enabled for this group. Users inactive for {days} days will be kicked.")
-    print(f"[DEBUG] Inactive kicking enabled for group {group_id} with threshold {days} days")
+    logger.debug(f"Inactive kicking enabled for group {group_id} with threshold {days} days")
 
 async def check_and_kick_inactive_users(app):
     """
     Checks all groups with inactivity kicking enabled and kicks users who have been inactive too long.
     """
-    print("[DEBUG] Running periodic inactive user check...")
+    logger.debug("Running periodic inactive user check...")
     settings = load_inactive_settings()
     activity = load_activity_data()
     now = int(time.time())
@@ -2876,9 +2922,9 @@ async def check_and_kick_inactive_users(app):
                         await bot.unban_chat_member(int(group_id), int(user_id))  # Unban to allow rejoining
                         print(f"[DEBUG] Kicked inactive user {user_id} from group {group_id}")
                     except Exception as e:
-                        print(f"[ERROR] Failed to kick user {user_id} from group {group_id}: {e}")
+                        logger.error(f"Failed to kick user {user_id} from group {group_id}: {e}")
         except Exception as e:
-            print(f"[ERROR] Failed to process group {group_id} for inactivity kicking: {e}")
+            logger.error(f"Failed to process group {group_id} for inactivity kicking: {e}")
 
 # =============================
 # Command Registration Helper
@@ -2902,9 +2948,8 @@ def add_command(app: Application, command: str, handler):
 
 
 if __name__ == '__main__':
-    print('Starting Telegram Bot...')
-    print(f'TOKEN value: {TOKEN}')
-    print(f'TOKEN repr: {repr(TOKEN)}')
+    logger.info('Starting Telegram Bot...')
+    logger.debug(f'TOKEN value: {TOKEN}')
     # Define post-init function to start periodic task after event loop is running
     async def periodic_inactive_check_job(context: ContextTypes.DEFAULT_TYPE):
         await check_and_kick_inactive_users(context.application)
@@ -3002,12 +3047,12 @@ if __name__ == '__main__':
 
     # Debug: catch-all handler to log all incoming messages
     async def debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        print(f"DEBUG: Received update: {update}")
+        logger.debug(f"Received update: {update}")
     app.add_handler(MessageHandler(filters.ALL, debug_handler))
 
     # Errors
-    app.add_error_handler(error)
+    app.add_error_handler(error_handler)
 
     #Check for updates
-    print('Polling...')
+    logger.info('Polling...')
     app.run_polling(poll_interval=0.5)
