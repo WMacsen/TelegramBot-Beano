@@ -21,7 +21,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("bot.log"),
+        logging.FileHandler("bot.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -3073,7 +3073,7 @@ if __name__ == '__main__':
             ROUND_SELECTION: [CallbackQueryHandler(round_selection)],
             STAKE_TYPE_SELECTION: [CallbackQueryHandler(stake_type_selection)],
             STAKE_SUBMISSION_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, stake_submission_points)],
-            STAKE_SUBMISSION_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, stake_submission_media)],
+            STAKE_SUBMISSION_MEDIA: [MessageHandler(filters.ATTACHMENT, stake_submission_media)],
             CONFIRMATION: [
                 CallbackQueryHandler(confirm_game_setup, pattern='^confirm_game_'),
                 CallbackQueryHandler(restart_game_setup, pattern='^restart_game_'),
