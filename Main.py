@@ -2647,14 +2647,16 @@ async def show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return CONFIRMATION
 
 async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point for the opponent to set up their stake."""
-    game_id = context.args[0].split('_')[-1]
+    """Entry point for the opponent to set up their stake via callback."""
+    query = update.callback_query
+    await query.answer()
+    game_id = query.data.split('_')[-1]
 
     games_data = load_games_data()
     game = games_data.get(game_id)
 
-    if not game or game['opponent_id'] != update.effective_user.id:
-        await update.message.reply_text("This is not a valid game for you to set up.")
+    if not game or game['opponent_id'] != query.from_user.id:
+        await query.edit_message_text("This is not a valid game for you to set up.")
         return ConversationHandler.END
 
     context.user_data['game_id'] = game_id
@@ -2666,7 +2668,7 @@ async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYP
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
+    await query.edit_message_text(
         text="What would you like to stake?",
         reply_markup=reply_markup
     )
@@ -2889,7 +2891,7 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
 
         await query.edit_message_text("Challenge accepted! Please check your private messages to set up your stake.")
 
-        keyboard = [[InlineKeyboardButton("Set Up Stake", url=f"https://t.me/{BOT_USERNAME}?start=setstake_{game_id}")]]
+        keyboard = [[InlineKeyboardButton("Set your stakes", callback_data=f"opponent_setup_{game_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.send_message(
             chat_id=user_id,
@@ -3064,7 +3066,7 @@ if __name__ == '__main__':
     game_setup_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_game_setup, pattern='^start_game_setup_'),
-            CommandHandler('start', start_opponent_setup, filters=filters.Regex('^setstake_'))
+            CallbackQueryHandler(start_opponent_setup, pattern='^opponent_setup_')
         ],
         states={
             GAME_SELECTION: [CallbackQueryHandler(game_selection)],
@@ -3103,7 +3105,7 @@ if __name__ == '__main__':
     # The group=1 makes it lower priority than the static commands registered with add_command (which are in the default group 0)
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^[./!].*'), dynamic_hashtag_command), group=1)
 
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
+    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.Document) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
     async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Normalize so .message is always present
