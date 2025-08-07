@@ -2957,6 +2957,7 @@ if __name__ == '__main__':
             ],
         },
         fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_')],
+        per_message=True,
     )
     # Battleship placement handler
     battleship_placement_handler = ConversationHandler(
@@ -2965,6 +2966,7 @@ if __name__ == '__main__':
             BS_AWAITING_PLACEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bs_handle_placement)],
         },
         fallbacks=[MessageHandler(filters.Regex(r'^[./!](cancel)$'), command_router)],
+        per_message=True,
         conversation_timeout=600  # 10 minutes to place all ships
     )
     app.add_handler(battleship_placement_handler)
