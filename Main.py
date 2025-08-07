@@ -64,6 +64,14 @@ def command_handler_wrapper(admin_only=False):
             should_delete = True
 
             try:
+                # Check if the command is disabled
+                if chat.type in ['group', 'supergroup']:
+                    command_name = func.__name__.replace('_command', '')
+                    disabled_cmds = set(load_disabled_commands().get(str(chat.id), []))
+                    if command_name in disabled_cmds:
+                        logger.info(f"Command '{command_name}' is disabled in group {chat.id}. Aborting.")
+                        return # Silently abort if command is disabled
+
                 if admin_only and chat.type in ['group', 'supergroup']:
                     member = await context.bot.get_chat_member(chat.id, user.id)
                     if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
@@ -2011,8 +2019,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Removed dynamic command: /{tag}")
         return
     # Static command disabling
-    static_commands = ['start', 'help', 'beowned', 'command', 'admin']
-    if tag in static_commands:
+    if tag in COMMAND_MAP:
         group_id = str(update.effective_chat.id)
         disabled = load_disabled_commands()
         disabled.setdefault(group_id, set())
