@@ -584,13 +584,18 @@ async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, win
         points_val = loser_stake['value']
         await add_user_points(game['group_id'], winner_id, points_val, context)
         await add_user_points(game['group_id'], loser_id, -points_val, context)
+        message = f"{winner_name.capitalize()} has won the game! {loser_name} lost {points_val} points."
+        if 'fag' in winner_name:
+            message = f"The {winner_name} has won the game! {loser_name} lost {points_val} points."
         await context.bot.send_message(
             game['group_id'],
-            f"{winner_name} has won the game! {loser_name} lost {points_val} points.",
+            message,
             parse_mode='HTML'
         )
     else:  # media
-        caption = f"{winner_name} won the game! This is the loser's stake from {loser_name}."
+        caption = f"{winner_name.capitalize()} won the game! This is the loser's stake from {loser_name}."
+        if 'fag' in winner_name:
+            caption = f"The {winner_name} won the game! This is the loser's stake from {loser_name}."
         if loser_stake['type'] == 'photo':
             await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
         elif loser_stake['type'] == 'video':
@@ -651,8 +656,12 @@ async def connect_four_move_handler(update: Update, context: ContextTypes.DEFAUL
 
         board_text, _ = create_connect_four_board_markup(board, game_id)
 
+        win_message = f"{winner_name.capitalize()} wins!"
+        if 'fag' in winner_name:
+            win_message = f"The {winner_name} wins!"
+
         await query.edit_message_text(
-            f"<b>Connect Four - Game Over!</b>\n\n{board_text}\n{winner_name} wins!",
+            f"<b>Connect Four - Game Over!</b>\n\n{board_text}\n{win_message}",
             parse_mode='HTML'
         )
         await handle_game_over(context, game_id, winner_id, loser_id)
@@ -823,9 +832,12 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if all_sunk:
         winner_name = get_display_name(int(user_id_str), query.from_user.full_name)
+        win_message = f"The game is over! {winner_name.capitalize()} has won the battle!"
+        if 'fag' in winner_name:
+            win_message = f"The game is over! The {winner_name} has won the battle!"
         await context.bot.send_message(
             chat_id=game['group_id'],
-            text=f"The game is over! {winner_name} has won the battle!",
+            text=win_message,
             parse_mode='HTML'
         )
         await handle_game_over(context, game_id, int(user_id_str), int(opponent_id_str))
@@ -1145,17 +1157,18 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             display_name = get_display_name(user_id, update.effective_user.full_name)
             chat_title = update.effective_chat.title
 
-            await update.message.reply_text(
-                f"{display_name}, you have selected 'Other'. Please contact Beta or Lion to determine your reward and its cost.",
-                parse_mode='HTML'
-            )
+            message = f"You have selected 'Other', {display_name}. Please contact Beta or Lion to determine your reward and its cost."
+            await update.message.reply_text(message, parse_mode='HTML')
 
             admins = await context.bot.get_chat_administrators(update.effective_chat.id)
             for admin in admins:
                 try:
+                    admin_message = f"The user {display_name} has selected the 'Other' reward in group {chat_title}. They will contact you to finalize the details."
+                    if 'fag' in display_name:
+                        admin_message = f"The fag has selected the 'Other' reward in group {chat_title}. They will contact you to finalize the details."
                     await context.bot.send_message(
                         chat_id=admin.user.id,
-                        text=f"User {display_name} has selected the 'Other' reward in group {chat_title}. They will contact you to finalize the details.",
+                        text=admin_message,
                         parse_mode='HTML'
                     )
                 except Exception:
@@ -1268,9 +1281,12 @@ async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         target_username = state['target_username']
 
         # Announce in group
+        message = f"{challenger_name.capitalize()} has a task for {target_username}: {task_description}"
+        if 'fag' in challenger_name:
+            message = f"The {challenger_name} has a task for {target_username}: {task_description}"
         await context.bot.send_message(
             chat_id=group_id,
-            text=f"{challenger_name} has a task for {target_username}: {task_description}",
+            text=message,
             parse_mode='HTML'
         )
 
@@ -1532,16 +1548,24 @@ async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loser_name = get_display_name(loser_id, loser_member.user.full_name)
     winner_name = get_display_name(winner_id, winner_member.user.full_name)
 
+    # Determine the message based on whether the loser is a 'fag'
+    message = f"{loser_name.capitalize()} is a loser! They lost {loser_stake['value']} points to {winner_name}."
+    if 'fag' in loser_name:
+        message = f"The {loser_name} is a loser! They lost {loser_stake['value']} points to {winner_name}."
+
     if loser_stake['type'] == 'points':
         await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
         await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
         await context.bot.send_message(
             game['group_id'],
-            f"{loser_name} is a loser! They lost {loser_stake['value']} points to {winner_name}.",
+            message,
             parse_mode='HTML'
         )
     else:
-        caption = f"{loser_name} is a loser! This was their stake."
+        caption = f"{loser_name.capitalize()} is a loser! This was their stake."
+        if 'fag' in loser_name:
+            caption = f"The {loser_name} is a loser! This was their stake."
+
         if loser_stake['type'] == 'photo':
             await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
         elif loser_stake['type'] == 'video':
@@ -1730,12 +1754,15 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = target_user.id
         points = get_user_points(group_id, target_id)
         display_name = get_display_name(target_id, target_user.full_name)
-        await update.message.reply_text(f"{display_name} has {points} points.")
+        message = f"{display_name.capitalize()} has {points} points."
+        if 'fag' in display_name:
+            message = f"The {display_name} has {points} points."
+        await update.message.reply_text(message)
         return
     # If no argument, show own points
     if not context.args:
         points = get_user_points(group_id, user.id)
-        await update.message.reply_text(f"You have {points} points.")
+        await update.message.reply_text(f"The fag has {points} points.")
         return
     # If argument, only allow admin to check others
     if not is_admin_user:
@@ -2764,10 +2791,14 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     winner_member = await context.bot.get_chat_member(active_game['group_id'], winner_id)
     winner_name = get_display_name(winner_id, winner_member.user.full_name)
+    win_message = f"{winner_name.capitalize()} wins round {active_game['current_round']}!\n" \
+                  f"Score: {active_game['challenger_score']} - {active_game['opponent_score']}"
+    if 'fag' in winner_name:
+        win_message = f"The {winner_name} wins round {active_game['current_round']}!\n" \
+                      f"Score: {active_game['challenger_score']} - {active_game['opponent_score']}"
     await context.bot.send_message(
         chat_id=active_game['group_id'],
-        text=f"{winner_name} wins round {active_game['current_round']}!\n"
-             f"Score: {active_game['challenger_score']} - {active_game['opponent_score']}",
+        text=win_message,
         parse_mode='HTML'
     )
 
@@ -2802,13 +2833,18 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if loser_stake['type'] == 'points':
             await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
             await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
+            message = f"{loser_name.capitalize()} is a loser! They lost {loser_stake['value']} points to {winner_name}."
+            if 'fag' in loser_name:
+                message = f"The {loser_name} is a loser! They lost {loser_stake['value']} points to {winner_name}."
             await context.bot.send_message(
                 game['group_id'],
-                f"{loser_name} is a loser! They lost {loser_stake['value']} points to {winner_name}.",
+                message,
                 parse_mode='HTML'
             )
         else:
-            caption = f"{loser_name} is a loser! This was their stake."
+            caption = f"{loser_name.capitalize()} is a loser! This was their stake."
+            if 'fag' in loser_name:
+                caption = f"The {loser_name} is a loser! This was their stake."
             if loser_stake['type'] == 'photo':
                 await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
             elif loser_stake['type'] == 'video':
@@ -2874,13 +2910,18 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
         )
 
         if challenger_stake['type'] == 'points':
+            message = f"{challenger_name.capitalize()} is a loser for being refused! They lost {challenger_stake['value']} points."
+            if 'fag' in challenger_name:
+                message = f"The {challenger_name} is a loser for being refused! They lost {challenger_stake['value']} points."
             await context.bot.send_message(
                 game['group_id'],
-                f"{challenger_name} is a loser for being refused! They lost {challenger_stake['value']} points.",
+                message,
                 parse_mode='HTML'
             )
         else:
-            caption = f"{challenger_name} is a loser for being refused! This was their stake."
+            caption = f"{challenger_name.capitalize()} is a loser for being refused! This was their stake."
+            if 'fag' in challenger_name:
+                caption = f"The {challenger_name} is a loser for being refused! This was their stake."
             if challenger_stake['type'] == 'photo':
                 await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
             elif challenger_stake['type'] == 'video':
