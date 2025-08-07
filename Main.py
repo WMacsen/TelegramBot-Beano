@@ -28,6 +28,8 @@ logging.basicConfig(
 # Suppress noisy library logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -3072,11 +3074,6 @@ if __name__ == '__main__':
         # Add future logic here as needed
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, edited_message_handler))
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
-
-    # Debug: catch-all handler to log all incoming messages
-    async def debug_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        logger.debug(f"Received update: {update}")
-    app.add_handler(MessageHandler(filters.ALL, debug_handler))
 
     # Errors
     app.add_error_handler(error_handler)
