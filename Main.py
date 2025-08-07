@@ -1853,28 +1853,20 @@ async def hashtag_message_handler(update: Update, context: ContextTypes.DEFAULT_
 async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles dynamic hashtag commands (e.g. /mytag) to retrieve saved messages/media.
-    Also updates user activity for inactivity tracking.
+    This acts as a fallback for any command not in COMMAND_MAP.
     """
     if update.effective_chat.type == "private":
-        await update.message.reply_text("This command can only be used in group chats.")
+        # This message is not sent because the wrapper deletes the command.
+        # It's better to handle this check inside the command logic if a response is needed.
         return
-    # Update user activity for inactivity tracking
-    if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
-        update_user_activity(update.effective_user.id, update.effective_chat.id)
-    print("[DEBUG] dynamic_hashtag_command called")
-    if not update.message or not update.message.text:
-        print("[DEBUG] No message or text in dynamic_hashtag_command.")
-        return
-    command = update.message.text[1:].split()[0].lower()  # Remove leading /
 
-    # Prevent this handler from hijacking static commands
-    static_commands = [
-        'start', 'help', 'beowned', 'command', 'remove', 'admin', 'link', 'inactive',
-        'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
-        'point', 'top5', 'addpunishment', 'removepunishment', 'punishment', 'newgame',
-        'loser', 'cleangames', 'chance'
-    ]
-    if command in static_commands:
+    if not update.message or not update.message.text:
+        return
+
+    command = update.message.text[1:].split()[0].lower()
+
+    # Prevent this handler from hijacking static commands defined in COMMAND_MAP
+    if command in COMMAND_MAP:
         return
 
     data = load_hashtag_data()
@@ -1904,6 +1896,18 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 # =============================
 # /command - List all commands
 # =============================
+COMMAND_MAP = {
+    'start': {'is_admin': False}, 'help': {'is_admin': False}, 'beowned': {'is_admin': False},
+    'command': {'is_admin': False}, 'remove': {'is_admin': True}, 'admin': {'is_admin': False},
+    'link': {'is_admin': True}, 'inactive': {'is_admin': True}, 'addreward': {'is_admin': True},
+    'removereward': {'is_admin': True}, 'addpunishment': {'is_admin': True},
+    'removepunishment': {'is_admin': True}, 'punishment': {'is_admin': True},
+    'newgame': {'is_admin': False}, 'loser': {'is_admin': True}, 'cleangames': {'is_admin': True},
+    'chance': {'is_admin': False}, 'reward': {'is_admin': False}, 'cancel': {'is_admin': False},
+    'addpoints': {'is_admin': True}, 'removepoints': {'is_admin': True},
+    'point': {'is_admin': False}, 'top5': {'is_admin': True}, 'setnickname': {'is_admin': True},
+}
+
 @command_handler_wrapper(admin_only=False)
 async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -2978,6 +2982,10 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack_'))
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
+
+    # Fallback handler for dynamic hashtag commands.
+    # The group=1 makes it lower priority than the static commands registered with add_command (which are in the default group 0)
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^[./!].*'), dynamic_hashtag_command), group=1)
 
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
