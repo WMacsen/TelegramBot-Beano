@@ -3105,7 +3105,7 @@ if __name__ == '__main__':
     # The group=1 makes it lower priority than the static commands registered with add_command (which are in the default group 0)
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^[./!].*'), dynamic_hashtag_command), group=1)
 
-    app.add_handler(MessageHandler((filters.TEXT | filters.ATTACHMENT) & ~filters.COMMAND, hashtag_message_handler))
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION | filters.ATTACHMENT) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
     async def edited_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Normalize so .message is always present
