@@ -606,6 +606,33 @@ async def removepunishment_command(update: Update, context: ContextTypes.DEFAULT
         save_punishments_data(punishments_data)
         await update.message.reply_text("Punishment removed.")
 
+async def punishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /punishment (admin only): Lists all punishments for the group.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("Only admins can use this command.")
+        return
+
+    group_id = str(update.effective_chat.id)
+    punishments_data = load_punishments_data()
+    group_punishments = punishments_data.get(group_id, [])
+
+    if not group_punishments:
+        await update.message.reply_text("No punishments have been set for this group.")
+        return
+
+    msg = "<b>Configured Punishments:</b>\n"
+    for p in sorted(group_punishments, key=lambda x: x['threshold'], reverse=True):
+        msg += f"• Below <b>{p['threshold']}</b> points: <i>{p['message']}</i>\n"
+
+    await update.message.reply_text(msg, parse_mode='HTML')
+
 async def removereward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /removereward (admin only): Start remove reward process
@@ -905,7 +932,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     static_commands = [
         'start', 'help', 'beowned', 'command', 'remove', 'admin', 'inactive',
         'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
-        'point', 'top5', 'addpunishment', 'removepunishment'
+        'point', 'top5', 'addpunishment', 'removepunishment', 'punishment'
     ]
     if command in static_commands:
         return
@@ -1241,6 +1268,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('removereward', removereward_command))
     app.add_handler(CommandHandler('addpunishment', addpunishment_command))
     app.add_handler(CommandHandler('removepunishment', removepunishment_command))
+    app.add_handler(CommandHandler('punishment', punishment_command))
     app.add_handler(CommandHandler('reward', reward_command))
     app.add_handler(CommandHandler('cancel', cancel_command))
     app.add_handler(CommandHandler('addpoints', addpoints_command))
