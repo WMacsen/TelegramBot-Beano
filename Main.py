@@ -297,6 +297,476 @@ def save_games_data(data):
     with open(GAMES_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
+# =============================
+# Game Logic Helpers
+# =============================
+def create_connect_four_board_markup(board: list, game_id: str):
+    """Creates the text and markup for a Connect Four board."""
+    emojis = {0: '⚫️', 1: '🔴', 2: '🟡'}
+    board_text = ""
+    for row in board:
+        board_text += " ".join([emojis.get(cell, '⚫️') for cell in row]) + "\n"
+
+    keyboard = [
+        [InlineKeyboardButton(str(i + 1), callback_data=f'c4_move_{game_id}_{i}') for i in range(7)]
+    ]
+    return board_text, InlineKeyboardMarkup(keyboard)
+
+
+def check_connect_four_win(board: list, player_num: int) -> bool:
+    """Check for a win in Connect Four."""
+    # Check horizontal
+    for r in range(6):
+        for c in range(4):
+            if all(board[r][c + i] == player_num for i in range(4)):
+                return True
+    # Check vertical
+    for r in range(3):
+        for c in range(7):
+            if all(board[r + i][c] == player_num for i in range(4)):
+                return True
+    # Check diagonal (down-right)
+    for r in range(3):
+        for c in range(4):
+            if all(board[r + i][c + i] == player_num for i in range(4)):
+                return True
+    # Check diagonal (up-right)
+    for r in range(3, 6):
+        for c in range(4):
+            if all(board[r - i][c + i] == player_num for i in range(4)):
+                return True
+    return False
+
+
+def check_connect_four_draw(board: list) -> bool:
+    """Check for a draw in Connect Four."""
+    return all(cell != 0 for cell in board[0])
+
+
+async def handle_game_over(context: ContextTypes.DEFAULT_TYPE, game_id: str, winner_id: int, loser_id: int):
+    """Handles the end of a game, distributing stakes."""
+    games_data = load_games_data()
+    game = games_data[game_id]
+
+    if str(game['challenger_id']) == str(loser_id):
+        loser_stake = game.get('challenger_stake')
+    else:
+        loser_stake = game.get('opponent_stake')
+
+    if not loser_stake:
+        print(f"[ERROR] No loser stake found for game {game_id}")
+        return
+
+    loser_member = await context.bot.get_chat_member(game['group_id'], loser_id)
+    winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+
+    if loser_stake['type'] == 'points':
+        points_val = loser_stake['value']
+        await add_user_points(game['group_id'], winner_id, points_val, context)
+        await add_user_points(game['group_id'], loser_id, -points_val, context)
+        await context.bot.send_message(
+            game['group_id'],
+            f"{winner_member.user.mention_html()} has won the game! {loser_member.user.mention_html()} lost {points_val} points.",
+            parse_mode='HTML'
+        )
+    else:  # media
+        caption = f"{winner_member.user.mention_html()} won the game! This is the loser's stake."
+        if loser_stake['type'] == 'photo':
+            await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+        elif loser_stake['type'] == 'video':
+            await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+        elif loser_stake['type'] == 'voice':
+            await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+
+    game['status'] = 'complete'
+    save_games_data(games_data)
+
+
+async def connect_four_move_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles a move in a Connect Four game."""
+    query = update.callback_query
+    await query.answer()
+
+    _, _, game_id, col_str = query.data.split('_')
+    col = int(col_str)
+    user_id = query.from_user.id
+
+    games_data = load_games_data()
+    game = games_data.get(game_id)
+
+    if not game or game.get('status') != 'active':
+        await query.edit_message_text("This game is no longer active.")
+        return
+
+    # Check if it's the user's turn
+    if game.get('turn') != user_id:
+        await query.answer("It's not your turn!", show_alert=True)
+        return
+
+    # Make the move
+    board = game['board']
+    player_num = 1 if user_id == game['challenger_id'] else 2
+
+    # Find the lowest empty row in the column
+    move_made = False
+    for r in range(5, -1, -1):
+        if board[r][col] == 0:
+            board[r][col] = player_num
+            move_made = True
+            break
+
+    if not move_made:
+        await query.answer("This column is full!", show_alert=True)
+        return
+
+    game['board'] = board
+
+    # Check for win
+    if check_connect_four_win(board, player_num):
+        winner_id = user_id
+        loser_id = game['opponent_id'] if user_id == game['challenger_id'] else game['challenger_id']
+
+        winner_member = await context.bot.get_chat_member(game['group_id'], winner_id)
+
+        board_text, _ = create_connect_four_board_markup(board, game_id)
+
+        await query.edit_message_text(
+            f"<b>Connect Four - Game Over!</b>\n\n{board_text}\n{winner_member.user.mention_html()} wins!",
+            parse_mode='HTML'
+        )
+        await handle_game_over(context, game_id, winner_id, loser_id)
+        return
+
+    # Check for draw
+    if check_connect_four_draw(board):
+        board_text, _ = create_connect_four_board_markup(board, game_id)
+        await query.edit_message_text(f"<b>Connect Four - Draw!</b>\n\n{board_text}\nThe game is a draw!")
+        game['status'] = 'complete'
+        save_games_data(games_data)
+        return
+
+    # Switch turns
+    game['turn'] = game['opponent_id'] if user_id == game['challenger_id'] else game['challenger_id']
+    save_games_data(games_data)
+
+    # Update board message
+    turn_player_id = game['turn']
+    turn_player = await context.bot.get_chat_member(game['group_id'], turn_player_id)
+    board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
+
+    await query.edit_message_text(
+        f"<b>Connect Four</b>\n\n{board_text}\nIt's {turn_player.user.mention_html()}'s turn.",
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+
+# =============================
+# Game Logic Helpers
+# =============================
+BATTLESHIP_SHIPS = {
+    "Carrier": 5, "Battleship": 4, "Cruiser": 3,
+    "Submarine": 3, "Destroyer": 2,
+}
+BS_AWAITING_PLACEMENT = 0
+
+def parse_bs_coords(coord_str: str) -> tuple[int, int] | None:
+    """Parses 'A1' style coordinates into (row, col) tuple."""
+    coord_str = coord_str.upper().strip()
+    if not (2 <= len(coord_str) <= 3): return None
+    col_char = coord_str[0]
+    row_str = coord_str[1:]
+    if not ('A' <= col_char <= 'J' and row_str.isdigit()): return None
+    row = int(row_str) - 1
+    col = ord(col_char) - ord('A')
+    if not (0 <= row <= 9 and 0 <= col <= 9): return None
+    return row, col
+
+def generate_bs_board_text(board: list, show_ships: bool = True) -> str:
+    """Generates a text representation of a battleship board."""
+    emojis = {'water': '🟦', 'ship': '🚢', 'hit': '🔥', 'miss': '❌'}
+
+    map_values = {0: emojis['water'], 1: emojis['ship'] if show_ships else emojis['water'], 2: emojis['miss'], 3: emojis['hit']}
+
+    header = '`  A B C D E F G H I J`\n'
+    board_text = header
+    for r, row_data in enumerate(board):
+        row_num = str(r + 1).rjust(2)
+        row_str = ' '.join([map_values.get(cell, '🟦') for cell in row_data])
+        board_text += f"`{row_num} {row_str}`\n"
+    return board_text
+
+async def bs_start_game_in_group(context: ContextTypes.DEFAULT_TYPE, game_id: str):
+    """Announces the start of the Battleship game in the group chat and prompts the first player."""
+    games_data = load_games_data()
+    game = games_data[game_id]
+
+    challenger_id = game['challenger_id']
+    challenger = await context.bot.get_chat_member(game['group_id'], challenger_id)
+
+    await context.bot.send_message(
+        chat_id=game['group_id'],
+        text=f"All ships have been placed! The battle begins now.\n\nIt's {challenger.user.mention_html()}'s turn to attack. Check your private messages!",
+        parse_mode='HTML'
+    )
+    await bs_send_turn_message(context, game_id)
+
+def check_bs_ship_sunk(board: list, ship_coords: list) -> bool:
+    """Checks if a ship has been completely sunk."""
+    return all(board[r][c] == 3 for r, c in ship_coords)
+
+async def bs_send_turn_message(context: ContextTypes.DEFAULT_TYPE, game_id: str, message_id: int = None, chat_id: int = None):
+    """Sends the private message to the current player to make their move."""
+    games_data = load_games_data()
+    game = games_data[game_id]
+
+    player_id_str = str(game['turn'])
+    opponent_id_str = str(game['opponent_id'] if player_id_str == str(game['challenger_id']) else game['challenger_id'])
+
+    my_board_text = generate_bs_board_text(game['boards'][player_id_str], show_ships=True)
+    tracking_board_text = generate_bs_board_text(game['boards'][opponent_id_str], show_ships=False)
+
+    # Keyboard to select a column to attack
+    keyboard = [
+        [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs_col_{game_id}_{c}") for c in range(5)],
+        [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs_col_{game_id}_{c}") for c in range(5, 10)]
+    ]
+
+    text = f"YOUR BOARD:\n{my_board_text}\nOPPONENT'S BOARD:\n{tracking_board_text}\nSelect a column to attack:"
+
+    if message_id and chat_id:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2'
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=int(player_id_str), text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2'
+        )
+
+async def bs_select_col_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the player selecting a column, then asks for the row."""
+    query = update.callback_query
+    await query.answer()
+
+    _, _, game_id, c_str = query.data.split('_')
+    c = int(c_str)
+
+    # Keyboard to select a row to attack
+    keyboard = [[InlineKeyboardButton(str(r + 1), callback_data=f"bs_attack_{game_id}_{r}_{c}") for r in range(10)]]
+
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the player's final attack choice."""
+    query = update.callback_query
+    await query.answer()
+
+    _, _, game_id, r_str, c_str = query.data.split('_')
+    r, c = int(r_str), int(c_str)
+    user_id_str = str(query.from_user.id)
+
+    games_data = load_games_data()
+    game = games_data.get(game_id)
+
+    if not game or game.get('status') != 'active':
+        await query.edit_message_text("This game is no longer active.")
+        return
+
+    if str(game.get('turn')) != user_id_str:
+        await query.answer("It's not your turn!", show_alert=True)
+        return
+
+    opponent_id_str = str(game['opponent_id'] if user_id_str == str(game['challenger_id']) else game['challenger_id'])
+    opponent_board = game['boards'][opponent_id_str]
+    target_val = opponent_board[r][c]
+
+    if target_val in [2, 3]:
+        await query.answer("You have already fired at this location.", show_alert=True)
+        return
+
+    result_text = ""
+    if target_val == 0:
+        opponent_board[r][c] = 2; result_text = "It's a MISS!"
+    elif target_val == 1:
+        opponent_board[r][c] = 3; result_text = "It's a HIT!"
+        for ship, coords in game['ships'][opponent_id_str].items():
+            if (r, c) in coords and check_bs_ship_sunk(opponent_board, coords):
+                result_text += f"\nYou sunk their {ship}!"
+                break
+
+    all_sunk = all(check_bs_ship_sunk(opponent_board, coords) for coords in game['ships'][opponent_id_str].values())
+
+    if all_sunk:
+        await context.bot.send_message(
+            chat_id=game['group_id'],
+            text=f"The game is over! {query.from_user.mention_html()} has won the battle!",
+            parse_mode='HTML'
+        )
+        await handle_game_over(context, game_id, int(user_id_str), int(opponent_id_str))
+        await query.edit_message_text("You are victorious! See the group for the result.")
+        return
+
+    game['turn'] = int(opponent_id_str)
+    save_games_data(games_data)
+
+    opponent_user = await context.bot.get_chat_member(game['group_id'], int(opponent_id_str))
+    coord_name = f"{chr(ord('A')+c)}{r+1}"
+
+    await query.edit_message_text(f"You fired at {coord_name}. {result_text}\n\nWaiting for {opponent_user.user.mention_html()} to move.", parse_mode='HTML')
+
+    try:
+        await context.bot.send_message(
+            chat_id=int(opponent_id_str),
+            text=f"{query.from_user.full_name} fired at {coord_name}. {result_text}"
+        )
+    except Exception as e:
+        print(f"Failed to send attack result to victim: {e}")
+
+    await context.bot.send_message(
+        chat_id=game['group_id'],
+        text=f"It is now {opponent_user.user.mention_html()}'s turn.",
+        parse_mode='HTML'
+    )
+
+    await bs_send_turn_message(context, game_id)
+
+async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point for the battleship ship placement conversation."""
+    query = update.callback_query
+    await query.answer()
+
+    _, _, game_id = query.data.split('_')
+    user_id = str(query.from_user.id)
+
+    games_data = load_games_data()
+    game = games_data.get(game_id)
+    if not game:
+        await query.edit_message_text("This game no longer exists.")
+        return ConversationHandler.END
+
+    if game.get('placement_complete', {}).get(user_id):
+        await query.edit_message_text("You have already placed your ships.")
+        return ConversationHandler.END
+
+    context.user_data['bs_game_id'] = game_id
+    context.user_data['bs_ships_to_place'] = list(BATTLESHIP_SHIPS.keys())
+
+    board_text = generate_bs_board_text(game['boards'][user_id])
+
+    ship_to_place = context.user_data['bs_ships_to_place'][0]
+    ship_size = BATTLESHIP_SHIPS[ship_to_place]
+
+    await query.edit_message_text(
+        f"Your board:\n{board_text}\n"
+        f"Place your {ship_to_place} ({ship_size} spaces).\n"
+        "Send coordinates in the format `A1 H` (for horizontal) or `A1 V` (for vertical).",
+        parse_mode='MarkdownV2'
+    )
+    return BS_AWAITING_PLACEMENT
+
+async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the user's input for placing a single ship."""
+    game_id = context.user_data.get('bs_game_id')
+    if not game_id: return ConversationHandler.END
+
+    user_id = str(update.effective_user.id)
+    games_data = load_games_data()
+    game = games_data[game_id]
+    board = game['boards'][user_id]
+
+    ship_name = context.user_data['bs_ships_to_place'][0]
+    ship_size = BATTLESHIP_SHIPS[ship_name]
+
+    text = update.message.text.strip().upper()
+    parts = text.split()
+
+    if len(parts) != 2:
+        await update.message.reply_text("Invalid format. Please use `A1 H` or `A1 V`.", parse_mode='MarkdownV2')
+        return BS_AWAITING_PLACEMENT
+
+    start_coord_str, orientation = parts
+    start_pos = parse_bs_coords(start_coord_str)
+
+    if not start_pos or orientation not in ['H', 'V']:
+        await update.message.reply_text("Invalid coordinate or orientation. Use `A1 H` or `B2 V`.", parse_mode='MarkdownV2')
+        return BS_AWAITING_PLACEMENT
+
+    r_start, c_start = start_pos
+    ship_coords = []
+
+    valid = True
+    for i in range(ship_size):
+        r, c = r_start, c_start
+        if orientation == 'H': c += i
+        else: r += i
+
+        if not (0 <= r <= 9 and 0 <= c <= 9): valid = False; break
+        if board[r][c] != 0: valid = False; break
+        ship_coords.append((r, c))
+
+    if not valid:
+        await update.message.reply_text("Invalid placement: ship is out of bounds or overlaps another ship. Try again.")
+        return BS_AWAITING_PLACEMENT
+
+    for r, c in ship_coords:
+        board[r][c] = 1
+    game['ships'][user_id][ship_name] = ship_coords
+
+    context.user_data['bs_ships_to_place'].pop(0)
+
+    save_games_data(games_data)
+    board_text = generate_bs_board_text(board)
+
+    if not context.user_data['bs_ships_to_place']:
+        game['placement_complete'][user_id] = True
+        save_games_data(games_data)
+
+        await update.message.reply_text(f"Final board:\n{board_text}\nAll ships placed! Waiting for opponent...", parse_mode='MarkdownV2')
+
+        opponent_id = str(game['opponent_id'] if user_id == str(game['challenger_id']) else game['challenger_id'])
+        if game.get('placement_complete', {}).get(opponent_id):
+            await bs_start_game_in_group(context, game_id)
+
+        return ConversationHandler.END
+    else:
+        next_ship_name = context.user_data['bs_ships_to_place'][0]
+        next_ship_size = BATTLESHIP_SHIPS[next_ship_name]
+        await update.message.reply_text(
+            f"Your board:\n{board_text}\n"
+            f"Place your {next_ship_name} ({next_ship_size} spaces). Format: `A1 H` or `A1 V`.",
+            parse_mode='MarkdownV2'
+        )
+        return BS_AWAITING_PLACEMENT
+
+async def bs_placement_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the ship placement conversation and aborts the game."""
+    game_id = context.user_data.get('bs_game_id')
+    if game_id:
+        games_data = load_games_data()
+        if game_id in games_data:
+            game = games_data[game_id]
+            # Notify the other player if possible
+            user_id = str(update.effective_user.id)
+            other_player_id = str(game['opponent_id'] if user_id == str(game['challenger_id']) else game['challenger_id'])
+            try:
+                await context.bot.send_message(
+                    chat_id=other_player_id,
+                    text=f"{update.effective_user.full_name} has cancelled the game during ship placement."
+                )
+            except Exception as e:
+                print(f"Failed to notify other player of cancellation: {e}")
+
+            # Delete the game
+            del games_data[game_id]
+            save_games_data(games_data)
+
+    await update.message.reply_text("Ship placement cancelled. The game has been aborted.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
 # =============================
 # Punishment System Storage & Helpers
 # =============================
@@ -1244,7 +1714,7 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
 
     # Prevent this handler from hijacking static commands
     static_commands = [
-        'start', 'help', 'beowned', 'command', 'remove', 'admin', 'inactive',
+        'start', 'help', 'beowned', 'command', 'remove', 'admin', 'link', 'inactive',
         'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
         'point', 'top5', 'addpunishment', 'removepunishment', 'punishment', 'newgame',
         'loser', 'cleangames', 'chance'
@@ -1298,6 +1768,7 @@ async def command_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
         ('/command', False),
         ('/remove', True),
         ('/admin', False),
+        ('/link', True),
         ('/inactive', True),
     ]
     group_id = str(update.effective_chat.id)
@@ -1412,6 +1883,59 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     await message.reply_text("Please describe the reason you need admin help. Your request will be sent to all group admins.")
     context.user_data[ADMIN_HELP_STATE] = True
+
+
+async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /link (admin only): Creates a single-use invite link for the group.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if chat.type == 'private':
+        await update.message.reply_text(
+            "This command is used to generate an invite link for a group. "
+            "Please run this command inside the group you want the link for."
+        )
+        return
+
+    if chat.type in ['group', 'supergroup']:
+        # Check if the user is an admin
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            await update.message.reply_text("Only admins can use this command.")
+            return
+
+        try:
+            # Create a single-use invite link
+            invite_link = await context.bot.create_chat_invite_link(
+                chat_id=chat.id,
+                member_limit=1,
+                name=f"Invite for {user.full_name}"
+            )
+
+            # Send the link to the admin in a private message
+            try:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"Here is your single-use invite link for the group '{chat.title}':\n{invite_link.invite_link}"
+                )
+                # Confirm in the group chat
+                await update.message.reply_text("I have sent you a single-use invite link in a private message.")
+            except Exception as e:
+                print(f"Failed to send private message to admin {user.id}: {e}")
+                await update.message.reply_text(
+                    "I couldn't send you a private message. "
+                    "Please make sure you have started a chat with me privately first."
+                )
+
+        except Exception as e:
+            print(f"Failed to create invite link for chat {chat.id}: {e}")
+            await update.message.reply_text(
+                "I was unable to create an invite link. "
+                "Please ensure I have the 'Invite Users via Link' permission in this group."
+            )
+
 
 #Start command
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1528,6 +2052,13 @@ async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     game_id = context.user_data['game_id']
     games_data = load_games_data()
     games_data[game_id]['game_type'] = game_type
+
+    if game_type == 'game_connect_four':
+        # Initialize Connect Four board (6 rows, 7 columns)
+        games_data[game_id]['board'] = [[0 for _ in range(7)] for _ in range(6)]
+        # Challenger goes first
+        games_data[game_id]['turn'] = games_data[game_id]['challenger_id']
+
     save_games_data(games_data)
 
     if game_type == 'game_dice':
@@ -1628,6 +2159,44 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
                 text=f"The game between {challenger.user.mention_html()} and {opponent.user.mention_html()} is on!",
                 parse_mode='HTML'
             )
+
+            if game['game_type'] == 'game_connect_four':
+                challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
+                board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
+                await context.bot.send_message(
+                    chat_id=game['group_id'],
+                    text=f"<b>Connect Four!</b>\n\n{board_text}\nIt's {challenger_member.user.mention_html()}'s turn.",
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+            elif game['game_type'] == 'game_battleship':
+                challenger_id = str(game['challenger_id'])
+                opponent_id = str(game['opponent_id'])
+                game['boards'] = {
+                    challenger_id: [[0] * 10 for _ in range(10)],
+                    opponent_id: [[0] * 10 for _ in range(10)]
+                }
+                game['ships'] = {challenger_id: {}, opponent_id: {}}
+                game['placement_complete'] = {challenger_id: False, opponent_id: False}
+                game['turn'] = game['challenger_id']
+                save_games_data(games_data)
+
+                placement_keyboard = [[InlineKeyboardButton("Begin Ship Placement", callback_data=f'bs_start_placement_{game_id}')]]
+                placement_markup = InlineKeyboardMarkup(placement_keyboard)
+                try:
+                    await context.bot.send_message(
+                        chat_id=game['challenger_id'],
+                        text="Your Battleship game is ready! It's time to place your ships.",
+                        reply_markup=placement_markup
+                    )
+                    await context.bot.send_message(
+                        chat_id=game['opponent_id'],
+                        text="Your Battleship game is ready! It's time to place your ships.",
+                        reply_markup=placement_markup
+                    )
+                except Exception as e:
+                    print(f"Error sending battleship placement message: {e}")
+
             return ConversationHandler.END
         else:
             # Since opponent is already selected, go straight to confirmation
@@ -1682,6 +2251,44 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
             text=f"The game between {challenger.user.mention_html()} and {opponent.user.mention_html()} is on!",
             parse_mode='HTML'
         )
+
+        if game['game_type'] == 'game_connect_four':
+            challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
+            board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
+            await context.bot.send_message(
+                chat_id=game['group_id'],
+                text=f"<b>Connect Four!</b>\n\n{board_text}\nIt's {challenger_member.user.mention_html()}'s turn.",
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        elif game['game_type'] == 'game_battleship':
+            challenger_id = str(game['challenger_id'])
+            opponent_id = str(game['opponent_id'])
+            game['boards'] = {
+                challenger_id: [[0] * 10 for _ in range(10)],
+                opponent_id: [[0] * 10 for _ in range(10)]
+            }
+            game['ships'] = {challenger_id: {}, opponent_id: {}}
+            game['placement_complete'] = {challenger_id: False, opponent_id: False}
+            game['turn'] = game['challenger_id']
+            save_games_data(games_data)
+
+            placement_keyboard = [[InlineKeyboardButton("Begin Ship Placement", callback_data=f'bs_start_placement_{game_id}')]]
+            placement_markup = InlineKeyboardMarkup(placement_keyboard)
+            try:
+                await context.bot.send_message(
+                    chat_id=game['challenger_id'],
+                    text="Your Battleship game is ready! It's time to place your ships.",
+                    reply_markup=placement_markup
+                )
+                await context.bot.send_message(
+                    chat_id=game['opponent_id'],
+                    text="Your Battleship game is ready! It's time to place your ships.",
+                    reply_markup=placement_markup
+                )
+            except Exception as e:
+                print(f"Error sending battleship placement message: {e}")
+
         return ConversationHandler.END
     else:
         return await show_confirmation(update, context)
@@ -2076,6 +2683,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('command', command_list_command))
     app.add_handler(CommandHandler('remove', remove_command))
     app.add_handler(CommandHandler('admin', admin_command))
+    app.add_handler(CommandHandler('link', link_command))
     app.add_handler(CommandHandler('inactive', inactive_command))
     app.add_handler(CommandHandler('addreward', addreward_command))
     app.add_handler(CommandHandler('removereward', removereward_command))
@@ -2115,8 +2723,22 @@ if __name__ == '__main__':
         },
         fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_')],
     )
+    # Battleship placement handler
+    battleship_placement_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(bs_start_placement, pattern='^bs_start_placement_')],
+        states={
+            BS_AWAITING_PLACEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bs_handle_placement)],
+        },
+        fallbacks=[CommandHandler('cancel', bs_placement_cancel)],
+        conversation_timeout=600  # 10 minutes to place all ships
+    )
+    app.add_handler(battleship_placement_handler)
+
     app.add_handler(game_setup_handler)
     app.add_handler(CallbackQueryHandler(challenge_response_handler, pattern='^(accept_challenge_|refuse_challenge_)'))
+    app.add_handler(CallbackQueryHandler(connect_four_move_handler, pattern=r'^c4_move_'))
+    app.add_handler(CallbackQueryHandler(bs_select_col_handler, pattern=r'^bs_col_'))
+    app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack_'))
     app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
 
     app.add_handler(MessageHandler(filters.COMMAND, dynamic_hashtag_command))
