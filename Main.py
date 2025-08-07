@@ -2885,6 +2885,10 @@ async def command_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command_with_prefix = message_text.split()[0]
     command = command_with_prefix[1:].lower()
 
+    # Let conversation handlers take priority for their entry points
+    if command.startswith('setstake_'):
+        return
+
     context.args = message_text.split()[1:]
 
     command_info = COMMAND_MAP.get(command)
@@ -2942,7 +2946,7 @@ if __name__ == '__main__':
     game_setup_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_game_setup, pattern='^start_game_setup_'),
-            # The command router will handle the /start setstake command
+            CommandHandler('start', start_opponent_setup, filters=filters.Regex('^setstake_'))
         ],
         states={
             GAME_SELECTION: [CallbackQueryHandler(game_selection)],
@@ -2957,7 +2961,6 @@ if __name__ == '__main__':
             ],
         },
         fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_')],
-        per_message=True,
     )
     # Battleship placement handler
     battleship_placement_handler = ConversationHandler(
@@ -2965,8 +2968,7 @@ if __name__ == '__main__':
         states={
             BS_AWAITING_PLACEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bs_handle_placement)],
         },
-        fallbacks=[MessageHandler(filters.Regex(r'^[./!](cancel)$'), command_router)],
-        per_message=True,
+        fallbacks=[CommandHandler('cancel', bs_placement_cancel)],
         conversation_timeout=600  # 10 minutes to place all ships
     )
     app.add_handler(battleship_placement_handler)
@@ -2980,7 +2982,7 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.Dice, dice_roll_handler))
 
     # Add the command router for /, ., and ! prefixes. This replaces all CommandHandlers.
-    app.add_handler(MessageHandler(filters.Regex(r'^[./!]\w+'), command_router))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^[./!].*'), command_router))
 
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
     # Unified handler for edited messages: process hashtags, responses, and future logic
