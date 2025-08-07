@@ -5,8 +5,9 @@ import os
 import json
 import re
 from typing import Final
-from telegram import Update, User
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
+import uuid
+from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler
 from telegram.constants import ChatMemberStatus
 
 # Debug: Print all environment variables at startup
@@ -230,6 +231,21 @@ async def add_user_points(group_id, user_id, delta, context: ContextTypes.DEFAUL
     set_user_points(group_id, user_id, points)
     print(f"[DEBUG] Added {delta} points for user {user_id} in group {group_id} (new total: {points})")
     await check_for_punishment(group_id, user_id, context)
+
+# =============================
+# Game System Storage & Helpers
+# =============================
+GAMES_DATA_FILE = 'games.json'
+
+def load_games_data():
+    if os.path.exists(GAMES_DATA_FILE):
+        with open(GAMES_DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_games_data(data):
+    with open(GAMES_DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # =============================
 # Punishment System Storage & Helpers
@@ -606,6 +622,134 @@ async def removepunishment_command(update: Update, context: ContextTypes.DEFAULT
         save_punishments_data(punishments_data)
         await update.message.reply_text("Punishment removed.")
 
+async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /newgame (group only): Starts the process of setting up a new game.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+
+    user = update.effective_user
+    game_id = str(uuid.uuid4())
+    games_data = load_games_data()
+
+    games_data[game_id] = {
+        "group_id": update.effective_chat.id,
+        "challenger_id": user.id,
+        "opponent_id": None,
+        "game_type": None,
+        "challenger_stake": None,
+        "opponent_stake": None,
+        "status": "pending_game_selection"
+    }
+    save_games_data(games_data)
+
+    # Public message
+    await update.message.reply_text(f"{user.mention_html()}, please check your private messages to set up the game.", parse_mode='HTML')
+
+    # Private message with button
+    try:
+        keyboard = [[InlineKeyboardButton("Start Game Setup", callback_data=f"start_game_setup_{game_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Let's set up your game! Click the button below to begin.",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        print(f"Failed to send private message to user {user.id}: {e}")
+        await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
+
+async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /loser <user> (admin only): Enacts the loser condition for the specified user.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("Only admins can use this command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /loser <@username or user_id>")
+        return
+
+    loser_username = context.args[0]
+    loser_id = await get_user_id_by_username(context, update.effective_chat.id, loser_username)
+    if not loser_id:
+        try:
+            loser_id = int(loser_username)
+        except ValueError:
+            await update.message.reply_text(f"Could not find user {loser_username}.")
+            return
+
+    games_data = load_games_data()
+
+    latest_game_id = None
+    for game_id, game in games_data.items():
+        if str(game.get('group_id')) == str(update.effective_chat.id) and \
+           game.get('status') == 'active' and \
+           (str(game.get('challenger_id')) == str(loser_id) or str(game.get('opponent_id')) == str(loser_id)):
+            latest_game_id = game_id
+
+    if not latest_game_id:
+        await update.message.reply_text(f"No active game found for user {loser_username}.")
+        return
+
+    game = games_data[latest_game_id]
+
+    if str(game['challenger_id']) == str(loser_id):
+        winner_id = game['opponent_id']
+        loser_stake = game['challenger_stake']
+    else:
+        winner_id = game['challenger_id']
+        loser_stake = game['opponent_stake']
+
+    if loser_stake['type'] == 'points':
+        await add_user_points(game['group_id'], winner_id, loser_stake['value'], context)
+        await add_user_points(game['group_id'], loser_id, -loser_stake['value'], context)
+        await context.bot.send_message(game['group_id'], f"The loser has paid their stake of {loser_stake['value']} points to the winner.")
+    else:
+        caption = "The loser's stake has been exposed!"
+        if loser_stake['type'] == 'photo':
+            await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption)
+        elif loser_stake['type'] == 'video':
+            await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption)
+        elif loser_stake['type'] == 'voice':
+            await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption)
+
+    game['status'] = 'complete'
+    save_games_data(games_data)
+
+async def cleangames_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /cleangames (admin only): Clears out completed or stale game data.
+    """
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("This command can only be used in group chats.")
+        return
+
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("Only admins can use this command.")
+        return
+
+    games_data = load_games_data()
+    games_to_keep = {
+        game_id: game for game_id, game in games_data.items()
+        if game.get('status') != 'complete'
+    }
+
+    if len(games_to_keep) == len(games_data):
+        await update.message.reply_text("No completed games to clean up.")
+    else:
+        save_games_data(games_to_keep)
+        await update.message.reply_text("Cleaned up completed games.")
+
 async def punishment_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /punishment (admin only): Lists all punishments for the group.
@@ -670,11 +814,7 @@ async def addpoints_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if arg.isdigit():
             target_id = int(arg)
         else:
-            username = arg.lstrip('@').lower()
-            for member in await context.bot.get_chat_administrators(update.effective_chat.id):
-                if member.user.username and member.user.username.lower() == username:
-                    target_id = member.user.id
-                    break
+            target_id = await get_user_id_by_username(context, update.effective_chat.id, arg)
             # get_chat_member with username will not work unless it's a numeric ID
     if not target_id:
         await update.message.reply_text(f"Could not resolve user. Please reply to a user's message or provide a valid user ID.")
@@ -706,11 +846,7 @@ async def removepoints_command(update: Update, context: ContextTypes.DEFAULT_TYP
         if arg.isdigit():
             target_id = int(arg)
         else:
-            username = arg.lstrip('@').lower()
-            for member in await context.bot.get_chat_administrators(update.effective_chat.id):
-                if member.user.username and member.user.username.lower() == username:
-                    target_id = member.user.id
-                    break
+            target_id = await get_user_id_by_username(context, update.effective_chat.id, arg)
             # get_chat_member with username will not work unless it's a numeric ID
     if not target_id:
         await update.message.reply_text(f"Could not resolve user. Please reply to a user's message or provide a valid user ID.")
@@ -749,11 +885,7 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg.isdigit():
         target_id = int(arg)
     else:
-        username = arg.lstrip('@').lower()
-        for member in await context.bot.get_chat_administrators(update.effective_chat.id):
-            if member.user.username and member.user.username.lower() == username:
-                target_id = member.user.id
-                break
+        target_id = await get_user_id_by_username(context, update.effective_chat.id, arg)
         # get_chat_member with username will not work unless it's a numeric ID
     if not target_id:
         await update.message.reply_text(f"Could not resolve user '{arg}'. Please reply to a user's message or provide a valid user ID.")
@@ -932,7 +1064,8 @@ async def dynamic_hashtag_command(update: Update, context: ContextTypes.DEFAULT_
     static_commands = [
         'start', 'help', 'beowned', 'command', 'remove', 'admin', 'inactive',
         'addreward', 'removereward', 'reward', 'cancel', 'addpoints', 'removepoints',
-        'point', 'top5', 'addpunishment', 'removepunishment', 'punishment'
+        'point', 'top5', 'addpunishment', 'removepunishment', 'punishment', 'newgame',
+        'loser', 'cleangames'
     ]
     if command in static_commands:
         return
@@ -1100,6 +1233,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 #Start command
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args and context.args[0].startswith('setstake_'):
+        return  # This is handled by the game setup conversation handler
+
     # Update user activity for inactivity tracking
     if update.effective_user and update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
         update_user_activity(update.effective_user.id, update.effective_chat.id)
@@ -1175,6 +1311,334 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f'Update {update} caused error {context.error}')
+
+# =============================
+# Game Setup Conversation
+# =============================
+GAME_SELECTION, STAKE_TYPE_SELECTION, STAKE_SUBMISSION_POINTS, STAKE_SUBMISSION_MEDIA, OPPONENT_SELECTION, CONFIRMATION = range(6)
+
+async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the game setup conversation."""
+    query = update.callback_query
+    await query.answer()
+    game_id = query.data.split('_')[-1]
+    context.user_data['game_id'] = game_id
+
+    keyboard = [
+        [InlineKeyboardButton("Game A", callback_data='game_A')],
+        [InlineKeyboardButton("Game B", callback_data='game_B')],
+        [InlineKeyboardButton("Game C", callback_data='game_C')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text="Please select the game you want to play:",
+        reply_markup=reply_markup
+    )
+    return GAME_SELECTION
+
+async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the game selection and asks for the stake type."""
+    query = update.callback_query
+    await query.answer()
+    game_type = query.data
+
+    game_id = context.user_data['game_id']
+    games_data = load_games_data()
+    games_data[game_id]['game_type'] = game_type
+    save_games_data(games_data)
+
+    keyboard = [
+        [InlineKeyboardButton("Points", callback_data='stake_points')],
+        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data='stake_media')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        text="What would you like to stake?",
+        reply_markup=reply_markup
+    )
+    return STAKE_TYPE_SELECTION
+
+async def stake_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the stake type selection."""
+    query = update.callback_query
+    await query.answer()
+    stake_type = query.data
+
+    if stake_type == 'stake_points':
+        await query.edit_message_text(text="How many points would you like to stake?")
+        return STAKE_SUBMISSION_POINTS
+    elif stake_type == 'stake_media':
+        await query.edit_message_text(text="Please send the media file you would like to stake (photo, video, or voice note).")
+        return STAKE_SUBMISSION_MEDIA
+
+async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the submission of points as a stake."""
+    try:
+        points = int(update.message.text)
+        user_id = update.effective_user.id
+        game_id = context.user_data['game_id']
+        games_data = load_games_data()
+        group_id = games_data[game_id]['group_id']
+
+        user_points = get_user_points(group_id, user_id)
+        if user_points < points:
+            await update.message.reply_text(f"You don't have enough points. You have {user_points}, but you tried to stake {points}. Please enter a valid amount.")
+            return STAKE_SUBMISSION_POINTS
+
+        if context.user_data.get('player_role') == 'opponent':
+            games_data[game_id]['opponent_stake'] = {"type": "points", "value": points}
+        else:
+            games_data[game_id]['challenger_stake'] = {"type": "points", "value": points}
+        save_games_data(games_data)
+
+        if context.user_data.get('player_role') == 'opponent':
+            games_data[game_id]['status'] = 'active'
+            save_games_data(games_data)
+            game = games_data[game_id]
+            challenger = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
+            opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+            await context.bot.send_message(
+                chat_id=game['group_id'],
+                text=f"The game between {challenger.user.mention_html()} and {opponent.user.mention_html()} is on!",
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("Who would you like to challenge? Please provide their @username.")
+            return OPPONENT_SELECTION
+
+    except ValueError:
+        await update.message.reply_text("Please enter a valid number of points.")
+        return STAKE_SUBMISSION_POINTS
+
+async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the submission of media as a stake."""
+    message = update.message
+    file_id = None
+    media_type = None
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        media_type = 'photo'
+    elif message.video:
+        file_id = message.video.file_id
+        media_type = 'video'
+    elif message.voice:
+        file_id = message.voice.file_id
+        media_type = 'voice'
+    else:
+        await update.message.reply_text("That is not a valid media file. Please send a photo, video, or voice note.")
+        return STAKE_SUBMISSION_MEDIA
+
+    game_id = context.user_data['game_id']
+    games_data = load_games_data()
+
+    if context.user_data.get('player_role') == 'opponent':
+        games_data[game_id]['opponent_stake'] = {"type": media_type, "value": file_id}
+    else:
+        games_data[game_id]['challenger_stake'] = {"type": media_type, "value": file_id}
+    save_games_data(games_data)
+
+    if context.user_data.get('player_role') == 'opponent':
+        games_data[game_id]['status'] = 'active'
+        save_games_data(games_data)
+        game = games_data[game_id]
+        challenger = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
+        opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+        await context.bot.send_message(
+            chat_id=game['group_id'],
+            text=f"The game between {challenger.user.mention_html()} and {opponent.user.mention_html()} is on!",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Who would you like to challenge? Please provide their @username.")
+        return OPPONENT_SELECTION
+
+async def opponent_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the selection of an opponent."""
+    username = update.message.text.strip()
+    if not username.startswith('@'):
+        await update.message.reply_text("Please provide a valid @username.")
+        return OPPONENT_SELECTION
+
+    game_id = context.user_data['game_id']
+    games_data = load_games_data()
+    group_id = games_data[game_id]['group_id']
+
+    opponent_id = await get_user_id_by_username(context, group_id, username)
+
+    if not opponent_id:
+        await update.message.reply_text(f"Could not find user {username} in the group.")
+        return OPPONENT_SELECTION
+
+    games_data[game_id]['opponent_id'] = opponent_id
+    save_games_data(games_data)
+
+    # Show confirmation
+    game = games_data[game_id]
+    stake_type = game['challenger_stake']['type']
+    stake_value = game['challenger_stake']['value']
+    opponent = await context.bot.get_chat_member(group_id, opponent_id)
+
+    confirmation_text = (
+        f"<b>Game Setup Confirmation</b>\n\n"
+        f"<b>Game:</b> {game['game_type']}\n"
+        f"<b>Your Stake:</b> {stake_value} {stake_type}\n"
+        f"<b>Opponent:</b> {opponent.user.mention_html()}\n\n"
+        f"Is this correct?"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("Confirm", callback_data=f'confirm_game_{game_id}')],
+        [InlineKeyboardButton("Cancel", callback_data=f'cancel_game_{game_id}')],
+        [InlineKeyboardButton("Restart", callback_data=f'restart_game_{game_id}')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(confirmation_text, reply_markup=reply_markup, parse_mode='HTML')
+    return CONFIRMATION
+
+async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point for the opponent to set up their stake."""
+    game_id = context.args[0].split('_')[-1]
+
+    games_data = load_games_data()
+    game = games_data.get(game_id)
+
+    if not game or game['opponent_id'] != update.effective_user.id:
+        await update.message.reply_text("This is not a valid game for you to set up.")
+        return ConversationHandler.END
+
+    context.user_data['game_id'] = game_id
+    context.user_data['player_role'] = 'opponent'
+
+    keyboard = [
+        [InlineKeyboardButton("Points", callback_data='stake_points')],
+        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data='stake_media')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        text="What would you like to stake?",
+        reply_markup=reply_markup
+    )
+    return STAKE_TYPE_SELECTION
+
+async def cancel_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the game setup."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Game setup cancelled.")
+    game_id = context.user_data.get('game_id')
+    if game_id:
+        games_data = load_games_data()
+        if game_id in games_data:
+            del games_data[game_id]
+            save_games_data(games_data)
+    return ConversationHandler.END
+
+async def confirm_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Confirms the game setup and sends the challenge to the group."""
+    query = update.callback_query
+    await query.answer()
+    game_id = query.data.split('_')[-1]
+
+    games_data = load_games_data()
+    game = games_data[game_id]
+
+    game['status'] = 'pending_opponent_acceptance'
+    save_games_data(games_data)
+
+    challenger = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
+    opponent = await context.bot.get_chat_member(game['group_id'], game['opponent_id'])
+
+    challenge_text = (
+        f"🚨 <b>New Challenge!</b> 🚨\n\n"
+        f"{challenger.user.mention_html()} has challenged {opponent.user.mention_html()} to a game of {game['game_type']}!\n\n"
+        f"{opponent.user.mention_html()}, do you accept?"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Accept", callback_data=f'accept_challenge_{game_id}'),
+            InlineKeyboardButton("Refuse", callback_data=f'refuse_challenge_{game_id}'),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await context.bot.send_message(
+        chat_id=game['group_id'],
+        text=challenge_text,
+        reply_markup=reply_markup,
+        parse_mode='HTML'
+    )
+
+    await query.edit_message_text("Challenge has been sent!")
+    return ConversationHandler.END
+
+async def restart_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Restarts the game setup conversation."""
+    return await start_game_setup(update, context)
+
+async def challenge_response_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the opponent's response to a game challenge."""
+    query = update.callback_query
+    await query.answer()
+
+    response_type, game_id = query.data.rsplit('_', 1)
+
+    games_data = load_games_data()
+    game = games_data.get(game_id)
+
+    if not game:
+        await query.edit_message_text("This game challenge is no longer valid.")
+        return
+
+    user_id = update.effective_user.id
+    if user_id != game['opponent_id']:
+        await query.answer("This challenge is not for you.", show_alert=True)
+        return
+
+    if response_type == 'accept_challenge':
+        game['status'] = 'pending_opponent_stake'
+        save_games_data(games_data)
+
+        await query.edit_message_text("Challenge accepted! Please check your private messages to set up your stake.")
+
+        keyboard = [[InlineKeyboardButton("Set Up Stake", url=f"https://t.me/{BOT_USERNAME}?start=setstake_{game_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="You have accepted the challenge! Click the button below to set up your stake.",
+            reply_markup=reply_markup
+        )
+
+    elif response_type == 'refuse_challenge':
+        challenger_id = game['challenger_id']
+        challenger_stake = game['challenger_stake']
+
+        await context.bot.send_message(
+            chat_id=challenger_id,
+            text=f"Your challenge was refused."
+        )
+
+        if challenger_stake['type'] == 'points':
+            await context.bot.send_message(game['group_id'], f"The challenger has lost their stake of {challenger_stake['value']} points.")
+        else:
+            if challenger_stake['type'] == 'photo':
+                await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption="The challenger has lost their stake.")
+            elif challenger_stake['type'] == 'video':
+                await context.bot.send_video(game['group_id'], challenger_stake['value'], caption="The challenger has lost their stake.")
+            elif challenger_stake['type'] == 'voice':
+                await context.bot.send_voice(game['group_id'], challenger_stake['value'], caption="The challenger has lost their stake.")
+
+        del games_data[game_id]
+        save_games_data(games_data)
+
+        await query.edit_message_text("Challenge refused.")
 
 # =============================
 # /inactive command and auto-kick logic
@@ -1269,6 +1733,9 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('addpunishment', addpunishment_command))
     app.add_handler(CommandHandler('removepunishment', removepunishment_command))
     app.add_handler(CommandHandler('punishment', punishment_command))
+    app.add_handler(CommandHandler('newgame', newgame_command))
+    app.add_handler(CommandHandler('loser', loser_command))
+    app.add_handler(CommandHandler('cleangames', cleangames_command))
     app.add_handler(CommandHandler('reward', reward_command))
     app.add_handler(CommandHandler('cancel', cancel_command))
     app.add_handler(CommandHandler('addpoints', addpoints_command))
@@ -1278,6 +1745,28 @@ if __name__ == '__main__':
 
     # Add the conversation handler with a high priority
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_handler), group=-1)
+
+    game_setup_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_game_setup, pattern='^start_game_setup_'),
+            CommandHandler('start', start_opponent_setup, filters=filters.Regex('^setstake_'))
+        ],
+        states={
+            GAME_SELECTION: [CallbackQueryHandler(game_selection)],
+            STAKE_TYPE_SELECTION: [CallbackQueryHandler(stake_type_selection)],
+            STAKE_SUBMISSION_POINTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, stake_submission_points)],
+            STAKE_SUBMISSION_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.VOICE, stake_submission_media)],
+            OPPONENT_SELECTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, opponent_selection)],
+            CONFIRMATION: [
+                CallbackQueryHandler(confirm_game_setup, pattern='^confirm_game_'),
+                CallbackQueryHandler(restart_game_setup, pattern='^restart_game_'),
+                CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_'),
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game_')],
+    )
+    app.add_handler(game_setup_handler)
+    app.add_handler(CallbackQueryHandler(challenge_response_handler, pattern='^(accept_challenge_|refuse_challenge_)'))
 
     app.add_handler(MessageHandler(filters.COMMAND, dynamic_hashtag_command))
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, hashtag_message_handler))
