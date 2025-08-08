@@ -2673,6 +2673,7 @@ if __name__ == '__main__':
             ],
         },
         fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game:')],
+        per_message=True,
     )
     # Battleship placement handler
     battleship_placement_handler = ConversationHandler(
