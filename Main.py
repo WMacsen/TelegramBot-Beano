@@ -2081,6 +2081,7 @@ async def round_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def stake_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the stake type selection."""
     query = update.callback_query
+    logger.debug(f"stake_type_selection triggered with data: {query.data}")
     await query.answer()
     _, stake_type, game_id = query.data.split(':')
     context.user_data['game_id'] = game_id
@@ -2329,9 +2330,14 @@ async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['game_id'] = game_id
     context.user_data['player_role'] = 'opponent'
 
+    logger.debug(f"Opponent setup for game_id: {game_id}")
+    points_callback = f'stake:points:{game_id}'
+    media_callback = f'stake:media:{game_id}'
+    logger.debug(f"Generated callback data: {points_callback}, {media_callback}")
+
     keyboard = [
-        [InlineKeyboardButton("Points", callback_data=f'stake:points:{game_id}')],
-        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data=f'stake:media:{game_id}')],
+        [InlineKeyboardButton("Points", callback_data=points_callback)],
+        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data=media_callback)],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
