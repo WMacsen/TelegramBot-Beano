@@ -1422,12 +1422,13 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     challenger_name = get_display_name(challenger_user.id, challenger_user.full_name)
     opponent_name = get_display_name(opponent_user.id, opponent_user.full_name)
 
-    sent_message = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"{challenger_name} has challenged {opponent_name}! {challenger_name}, please check your private messages to set up the game.",
+    sent_message = await send_and_track_message(
+        context,
+        update.effective_chat.id,
+        game_id,
+        f"{challenger_name} has challenged {opponent_name}! {challenger_name}, please check your private messages to set up the game.",
         parse_mode='HTML'
     )
-    games_data[game_id]['messages_to_delete'].append({'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
     save_games_data(games_data)
 
     try:
@@ -2029,7 +2030,7 @@ async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     save_games_data(games_data)
 
-    if game_type == 'game_dice':
+    if game_type == 'dice':
         keyboard = [
             [InlineKeyboardButton("Best of 3", callback_data=f'rounds:3:{game_id}')],
             [InlineKeyboardButton("Best of 5", callback_data=f'rounds:5:{game_id}')],
@@ -2116,9 +2117,8 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
         save_games_data(games_data)
 
         if context.user_data.get('player_role') == 'opponent':
-            await delete_tracked_messages(context, game_id)
             game = games_data[game_id]
-            if game['game_type'] == 'game_dice':
+            if game['game_type'] == 'dice':
                 game['current_round'] = 1
                 game['challenger_score'] = 0
                 game['opponent_score'] = 0
@@ -2215,9 +2215,8 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
     save_games_data(games_data)
 
     if context.user_data.get('player_role') == 'opponent':
-        await delete_tracked_messages(context, game_id)
         game = games_data[game_id]
-        if game['game_type'] == 'game_dice':
+        if game['game_type'] == 'dice':
             game['current_round'] = 1
             game['challenger_score'] = 0
             game['opponent_score'] = 0
@@ -2385,9 +2384,11 @@ async def confirm_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_message(
-        chat_id=game['group_id'],
-        text=challenge_text,
+    await send_and_track_message(
+        context,
+        game['group_id'],
+        game_id,
+        challenge_text,
         reply_markup=reply_markup,
         parse_mode='HTML'
     )
