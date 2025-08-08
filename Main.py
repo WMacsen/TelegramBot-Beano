@@ -2000,9 +2000,9 @@ async def start_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data['game_id'] = game_id
 
     keyboard = [
-        [InlineKeyboardButton("Dice Game", callback_data=f'game_dice:{game_id}')],
-        [InlineKeyboardButton("Connect Four", callback_data=f'game_connect_four:{game_id}')],
-        [InlineKeyboardButton("Battleship", callback_data=f'game_battleship:{game_id}')],
+        [InlineKeyboardButton("Dice Game", callback_data=f'game:dice:{game_id}')],
+        [InlineKeyboardButton("Connect Four", callback_data=f'game:connect_four:{game_id}')],
+        [InlineKeyboardButton("Battleship", callback_data=f'game:battleship:{game_id}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2016,7 +2016,7 @@ async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Handles the game selection."""
     query = update.callback_query
     await query.answer()
-    game_type, game_id = query.data.split(':')
+    _, game_type, game_id = query.data.split(':')
     games_data = load_games_data()
     games_data[game_id]['game_type'] = game_type
 
@@ -2673,7 +2673,6 @@ if __name__ == '__main__':
             ],
         },
         fallbacks=[CallbackQueryHandler(cancel_game_setup, pattern='^cancel_game:')],
-        per_message=True,
     )
     # Battleship placement handler
     battleship_placement_handler = ConversationHandler(
