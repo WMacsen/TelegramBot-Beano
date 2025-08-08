@@ -2593,10 +2593,10 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
                 caption = f"The {challenger_name} is a loser for being refused! This was their stake."
             if challenger_stake['type'] == 'photo':
                 await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
-            elif challenger_stake['type'] == 'video':
-                await context.bot.send_video(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
-            elif challenger_stake['type'] == 'voice':
-                await context.bot.send_voice(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
+            elif loser_stake['type'] == 'video':
+                await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+            elif loser_stake['type'] == 'voice':
+                await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
 
         del games_data[game_id]
         save_games_data(games_data)
