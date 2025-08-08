@@ -2081,7 +2081,6 @@ async def round_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def stake_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the stake type selection."""
     query = update.callback_query
-    logger.debug(f"stake_type_selection triggered with data: {query.data}")
     await query.answer()
     _, stake_type, game_id = query.data.split(':')
     context.user_data['game_id'] = game_id
@@ -2330,14 +2329,9 @@ async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['game_id'] = game_id
     context.user_data['player_role'] = 'opponent'
 
-    logger.debug(f"Opponent setup for game_id: {game_id}")
-    points_callback = f'stake:points:{game_id}'
-    media_callback = f'stake:media:{game_id}'
-    logger.debug(f"Generated callback data: {points_callback}, {media_callback}")
-
     keyboard = [
-        [InlineKeyboardButton("Points", callback_data=points_callback)],
-        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data=media_callback)],
+        [InlineKeyboardButton("Points", callback_data=f'stake:points:{game_id}')],
+        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data=f'stake:media:{game_id}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2407,39 +2401,31 @@ async def restart_game_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles dice rolls for the Dice Game."""
-    logger.debug("dice_roll_handler triggered.")
     if not update.message or not update.message.dice or update.message.dice.emoji != '🎲':
-        logger.debug("Not a valid dice roll message, ignoring.")
         return
 
     user_id = update.effective_user.id
-    logger.debug(f"Dice roll from user_id: {user_id}")
     games_data = load_games_data()
 
     active_game_id = None
     active_game = None
     for game_id, game in games_data.items():
-        if game.get('game_type') == 'game_dice' and \
+        if game.get('game_type') == 'dice' and \
            game.get('status') == 'active' and \
            (game.get('challenger_id') == user_id or game.get('opponent_id') == user_id):
             active_game_id = game_id
             active_game = game
-            logger.debug(f"Found active dice game: {game_id}")
             break
 
     if not active_game:
-        logger.debug("No active dice game found for this user.")
         return
 
     # This is a lot of logic for one function. I will break it down in the future if needed.
     last_roll = active_game.get('last_roll')
-    logger.debug(f"Current last_roll state: {last_roll}")
 
     if not last_roll: # First roll of a round
-        logger.debug("This is the first roll of the round.")
         active_game['last_roll'] = {'user_id': user_id, 'value': update.message.dice.value}
         save_games_data(games_data)
-        logger.debug(f"Saved first roll: {active_game['last_roll']}")
         other_player_id = active_game['challenger_id'] if user_id == active_game['opponent_id'] else active_game['opponent_id']
         other_player_member = await context.bot.get_chat_member(active_game['group_id'], other_player_id)
         other_player_name = get_display_name(other_player_id, other_player_member.user.full_name)
@@ -2447,7 +2433,6 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if last_roll['user_id'] == user_id:
-        logger.debug("Same user rolled again, ignoring.")
         await send_and_track_message(context, update.effective_chat.id, active_game_id, "It's not your turn to roll.")
         return
 
@@ -2456,28 +2441,22 @@ async def dice_roll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     player2_id = user_id
     player1_roll = last_roll['value']
     player2_roll = update.message.dice.value
-    logger.debug(f"Second roll received. Player 1 ({player1_id}) rolled {player1_roll}. Player 2 ({player2_id}) rolled {player2_roll}.")
 
     if player1_roll > player2_roll:
         winner_id = player1_id
     elif player2_roll > player1_roll:
         winner_id = player2_id
     else: # Tie
-        logger.debug("Dice roll was a tie. Resetting for re-roll.")
         await send_and_track_message(context, update.effective_chat.id, active_game_id, f"You both rolled a {player1_roll}. It's a tie! Roll again.")
         active_game['last_roll'] = None # Reset for re-roll
         save_games_data(games_data)
         return
-
-    logger.debug(f"Round winner is user_id: {winner_id}")
 
     # Update scores
     if winner_id == active_game['challenger_id']:
         active_game['challenger_score'] += 1
     else:
         active_game['opponent_score'] += 1
-
-    logger.debug(f"New scores: Challenger: {active_game['challenger_score']}, Opponent: {active_game['opponent_score']}")
 
     winner_member = await context.bot.get_chat_member(active_game['group_id'], winner_id)
     winner_name = get_display_name(winner_id, winner_member.user.full_name)
