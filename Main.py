@@ -2330,8 +2330,8 @@ async def start_opponent_setup(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['player_role'] = 'opponent'
 
     keyboard = [
-        [InlineKeyboardButton("Points", callback_data='stake_points')],
-        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data='stake_media')],
+        [InlineKeyboardButton("Points", callback_data=f'stake:points:{game_id}')],
+        [InlineKeyboardButton("Media (Photo, Video, Voice Note)", callback_data=f'stake:media:{game_id}')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
