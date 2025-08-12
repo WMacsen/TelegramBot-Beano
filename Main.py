@@ -2025,7 +2025,7 @@ async def game_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     games_data = load_games_data()
     games_data[game_id]['game_type'] = game_type
 
-    if game_type == 'game_connect_four':
+    if game_type == 'connect_four':
         # Initialize Connect Four board (6 rows, 7 columns)
         games_data[game_id]['board'] = [[0 for _ in range(7)] for _ in range(6)]
         # Challenger goes first
