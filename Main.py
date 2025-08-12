@@ -493,7 +493,7 @@ def create_connect_four_board_markup(board: list, game_id: str):
         board_text += " ".join([emojis.get(cell, '⚫️') for cell in row]) + "\n"
 
     keyboard = [
-        [InlineKeyboardButton(str(i + 1), callback_data=f'c4_move_{game_id}_{i}') for i in range(7)]
+        [InlineKeyboardButton(str(i + 1), callback_data=f'c4:move:{game_id}:{i}') for i in range(7)]
     ]
     return board_text, InlineKeyboardMarkup(keyboard)
 
@@ -607,7 +607,7 @@ async def connect_four_move_handler(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
 
-    _, _, game_id, col_str = query.data.split('_')
+    _, _, game_id, col_str = query.data.split(':')
     col = int(col_str)
     user_id = query.from_user.id
 
@@ -757,8 +757,8 @@ async def bs_send_turn_message(context: ContextTypes.DEFAULT_TYPE, game_id: str,
 
     # Keyboard to select a column to attack
     keyboard = [
-        [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs_col_{game_id}_{c}") for c in range(5)],
-        [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs_col_{game_id}_{c}") for c in range(5, 10)]
+        [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs:col:{game_id}:{c}") for c in range(5)],
+        [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs:col:{game_id}:{c}") for c in range(5, 10)]
     ]
 
     text = f"YOUR BOARD:\n{my_board_text}\nOPPONENT'S BOARD:\n{tracking_board_text}\nSelect a column to attack:"
@@ -783,11 +783,11 @@ async def bs_select_col_handler(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
-    _, _, game_id, c_str = query.data.split('_')
+    _, _, game_id, c_str = query.data.split(':')
     c = int(c_str)
 
     # Keyboard to select a row to attack
-    keyboard = [[InlineKeyboardButton(str(r + 1), callback_data=f"bs_attack_{game_id}_{r}_{c}") for r in range(10)]]
+    keyboard = [[InlineKeyboardButton(str(r + 1), callback_data=f"bs:attack:{game_id}:{r}:{c}") for r in range(10)]]
 
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -796,7 +796,7 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, _, game_id, r_str, c_str = query.data.split('_')
+    _, _, game_id, r_str, c_str = query.data.split(':')
     r, c = int(r_str), int(c_str)
     user_id_str = str(query.from_user.id)
 
@@ -2692,9 +2692,9 @@ if __name__ == '__main__':
 
     app.add_handler(game_setup_handler)
     app.add_handler(CallbackQueryHandler(challenge_response_handler, pattern=r'^challenge:(accept|refuse):.*'))
-    app.add_handler(CallbackQueryHandler(connect_four_move_handler, pattern=r'^c4_move:'))
-    app.add_handler(CallbackQueryHandler(bs_select_col_handler, pattern=r'^bs_col:'))
-    app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs_attack:'))
+    app.add_handler(CallbackQueryHandler(connect_four_move_handler, pattern=r'^c4:move:.*'))
+    app.add_handler(CallbackQueryHandler(bs_select_col_handler, pattern=r'^bs:col:.*'))
+    app.add_handler(CallbackQueryHandler(bs_attack_handler, pattern=r'^bs:attack:.*'))
     app.add_handler(CallbackQueryHandler(help_menu_handler, pattern=r'^help_'))
     app.add_handler(MessageHandler(filters.Dice(), dice_roll_handler))
 
