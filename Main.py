@@ -1443,7 +1443,10 @@ async def newgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_games_data(games_data)
     except Exception:
         logger.exception(f"Failed to send private message to user {challenger_user.id}")
-        await update.message.reply_text("I couldn't send you a private message. Please make sure you have started a chat with me privately first.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="I couldn't send you a private message. Please make sure you have started a chat with me privately first."
+        )
 
 @command_handler_wrapper(admin_only=True)
 async def loser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
