@@ -2136,7 +2136,7 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode='HTML'
             )
 
-            if game['game_type'] == 'game_connect_four':
+            if game['game_type'] == 'connect_four':
                 challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
                 board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
                 await send_and_track_message(
@@ -2147,7 +2147,7 @@ async def stake_submission_points(update: Update, context: ContextTypes.DEFAULT_
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
-            elif game['game_type'] == 'game_battleship':
+            elif game['game_type'] == 'battleship':
                 challenger_id = str(game['challenger_id'])
                 opponent_id = str(game['opponent_id'])
                 game['boards'] = {
@@ -2234,7 +2234,7 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode='HTML'
         )
 
-        if game['game_type'] == 'game_connect_four':
+        if game['game_type'] == 'connect_four':
             challenger_member = await context.bot.get_chat_member(game['group_id'], game['challenger_id'])
             board_text, reply_markup = create_connect_four_board_markup(game['board'], game_id)
             await send_and_track_message(
@@ -2245,7 +2245,7 @@ async def stake_submission_media(update: Update, context: ContextTypes.DEFAULT_T
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
-        elif game['game_type'] == 'game_battleship':
+        elif game['game_type'] == 'battleship':
             challenger_id = str(game['challenger_id'])
             opponent_id = str(game['opponent_id'])
             game['boards'] = {
