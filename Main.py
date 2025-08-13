@@ -901,8 +901,8 @@ async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(
         f"Your board:\n{board_text}\n"
-        f"Place your {ship_to_place} ({ship_size} spaces).\n"
-        "Send coordinates in the format `A1 H` (for horizontal) or `A1 V` (for vertical).",
+        f"Place your {ship_to_place} \({ship_size} spaces\)\.\n"
+        "Send coordinates in the format `A1 H` (for horizontal) or `A1 V` (for vertical)\.",
         parse_mode='MarkdownV2'
     )
     return BS_AWAITING_PLACEMENT
