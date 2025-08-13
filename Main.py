@@ -979,7 +979,7 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
             update.effective_chat.id,
             game_id,
             f"Your board:\n{board_text}\n"
-            f"Place your {next_ship_name}: {next_ship_size} spaces. Format: `A1 H` or `A1 V`.",
+            f"Place your {next_ship_name}: {next_ship_size} spaces\. Format: `A1 H` or `A1 V`\.",
             parse_mode='MarkdownV2'
         )
         return BS_AWAITING_PLACEMENT
@@ -1707,38 +1707,40 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
         is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    target_user = None
-    # Check if we should get points for another user
-    if update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
-    elif context.args:
-        arg = context.args[0].strip()
-        if arg.isdigit():
-            try:
-                target_user = await context.bot.get_chat_member(group_id, int(arg)).user
-            except Exception:
-                target_user = None
-        else:
-            target_user_id = await get_user_id_by_username(context, group_id, arg)
-            if target_user_id:
+
+    # Default to showing the user's own points
+    target_user = user
+
+    # Check if another user is being targeted (by reply or by argument)
+    is_targeting_other = update.message.reply_to_message or context.args
+
+    if is_targeting_other:
+        if is_admin_user:
+            # Admin is trying to see someone else's points
+            if update.message.reply_to_message:
+                target_user = update.message.reply_to_message.from_user
+            else: # context.args must exist
+                arg = context.args[0].strip()
+                target_id = None
+                if arg.isdigit():
+                    target_id = int(arg)
+                else:
+                    target_id = await get_user_id_by_username(context, group_id, arg)
+
+                if not target_id:
+                    await update.message.reply_text(f"Could not resolve user '{arg}'.")
+                    return
                 try:
-                    target_user = await context.bot.get_chat_member(group_id, target_user_id).user
+                    target_user = (await context.bot.get_chat_member(group_id, target_id)).user
                 except Exception:
-                    target_user = None
-
-    # If a target is specified (by reply or arg), check for admin permissions
-    if target_user and target_user.id != user.id:
-        if not is_admin_user:
+                    await update.message.reply_text(f"Could not resolve user '{arg}'.")
+                    return
+        else:
+            # Non-admin is trying to see someone else's points
             await update.message.reply_text("Only admins can view other users' points. Showing your own points instead.")
-            target_user = None # Fallback to showing own points
-        elif not target_user: # Admin tried to get a user that doesn't exist
-             await update.message.reply_text(f"Could not resolve user.")
-             return
+            target_user = user # Reset to self
 
-    # Determine whose points to show
-    if not target_user:
-        target_user = user # Default to the user who sent the command
-
+    # Fetch and display points for the determined target
     points = get_user_points(group_id, target_user.id)
     display_name = get_display_name(target_user.id, target_user.full_name)
 
