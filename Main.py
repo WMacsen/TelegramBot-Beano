@@ -923,14 +923,14 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
     parts = text.split()
 
     if len(parts) != 2:
-        await update.message.reply_text("Invalid format. Please use `A1 H` or `A1 V`.", parse_mode='MarkdownV2')
+        await update.message.reply_text("Invalid format. Please use A1 H or A1 V.")
         return BS_AWAITING_PLACEMENT
 
     start_coord_str, orientation = parts
     start_pos = parse_bs_coords(start_coord_str)
 
     if not start_pos or orientation not in ['H', 'V']:
-        await update.message.reply_text("Invalid coordinate or orientation. Use `A1 H` or `B2 V`.", parse_mode='MarkdownV2')
+        await update.message.reply_text("Invalid coordinate or orientation. Use A1 H or B2 V.")
         return BS_AWAITING_PLACEMENT
 
     r_start, c_start = start_pos
@@ -2601,12 +2601,12 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
             caption = f"{challenger_name.capitalize()} is a loser for being refused! This was their stake."
             if 'fag' in challenger_name:
                 caption = f"The {challenger_name} is a loser for being refused! This was their stake."
-            if challenger_stake['type'] == 'photo':
-                await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
-            elif challenger_stake['type'] == 'video':
-                await context.bot.send_video(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
-            elif challenger_stake['type'] == 'voice':
-                await context.bot.send_voice(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
+            if loser_stake['type'] == 'photo':
+                await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+            elif loser_stake['type'] == 'video':
+                await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+            elif loser_stake['type'] == 'voice':
+                await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
 
         del games_data[game_id]
         save_games_data(games_data)
