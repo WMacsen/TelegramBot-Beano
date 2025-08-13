@@ -901,8 +901,8 @@ async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(
         f"Your board:\n{board_text}\n"
-        f"Place your {ship_to_place} \({ship_size} spaces\)\.\n"
-        "Send coordinates in the format `A1 H` (for horizontal) or `A1 V` (for vertical)\.",
+        f"Place your {ship_to_place} \\({ship_size} spaces\\)\\.\n"
+        "Send coordinates in the format `A1 H` \\(for horizontal\\) or `A1 V` \\(for vertical\\)\\.",
         parse_mode='MarkdownV2'
     )
     return BS_AWAITING_PLACEMENT
@@ -1707,42 +1707,48 @@ async def point_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         member = await context.bot.get_chat_member(update.effective_chat.id, user.id)
         is_admin_user = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-    # If used as a reply, show replied-to user's points
-    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+    target_user = None
+    # Check if we should get points for another user
+    if update.message.reply_to_message:
         target_user = update.message.reply_to_message.from_user
-        target_id = target_user.id
-        points = get_user_points(group_id, target_id)
-        display_name = get_display_name(target_id, target_user.full_name)
+    elif context.args:
+        arg = context.args[0].strip()
+        if arg.isdigit():
+            try:
+                target_user = await context.bot.get_chat_member(group_id, int(arg)).user
+            except Exception:
+                target_user = None
+        else:
+            target_user_id = await get_user_id_by_username(context, group_id, arg)
+            if target_user_id:
+                try:
+                    target_user = await context.bot.get_chat_member(group_id, target_user_id).user
+                except Exception:
+                    target_user = None
+
+    # If a target is specified (by reply or arg), check for admin permissions
+    if target_user and target_user.id != user.id:
+        if not is_admin_user:
+            await update.message.reply_text("Only admins can view other users' points. Showing your own points instead.")
+            target_user = None # Fallback to showing own points
+        elif not target_user: # Admin tried to get a user that doesn't exist
+             await update.message.reply_text(f"Could not resolve user.")
+             return
+
+    # Determine whose points to show
+    if not target_user:
+        target_user = user # Default to the user who sent the command
+
+    points = get_user_points(group_id, target_user.id)
+    display_name = get_display_name(target_user.id, target_user.full_name)
+
+    if target_user.id == user.id:
+        await update.message.reply_text(f"The fag has {points} points.")
+    else:
         message = f"{display_name.capitalize()} has {points} points."
         if 'fag' in display_name:
             message = f"The {display_name} has {points} points."
         await update.message.reply_text(message)
-        return
-    # If no argument, show own points
-    if not context.args:
-        points = get_user_points(group_id, user.id)
-        await update.message.reply_text(f"The fag has {points} points.")
-        return
-    # If argument, only allow admin to check others
-    if not is_admin_user:
-        await update.message.reply_text("You can only check your own points.")
-        return
-    arg = context.args[0].strip()
-    # Try to resolve by ID
-    target_id = None
-    if arg.isdigit():
-        target_id = int(arg)
-    else:
-        target_id = await get_user_id_by_username(context, update.effective_chat.id, arg)
-        # get_chat_member with username will not work unless it's a numeric ID
-    if not target_id:
-        await update.message.reply_text(f"Could not resolve user '{arg}'. Please reply to a user's message or provide a valid user ID.")
-        return
-
-    target_member = await context.bot.get_chat_member(group_id, target_id)
-    display_name = get_display_name(target_id, target_member.user.full_name)
-    points = get_user_points(group_id, target_id)
-    await update.message.reply_text(f"{display_name} has {points} points.")
 
 @command_handler_wrapper(admin_only=True)
 async def top5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
