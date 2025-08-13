@@ -9,6 +9,7 @@ import html
 import traceback
 from typing import Final
 import uuid
+import telegram
 from telegram import Update, User, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler, ConversationHandler
 from telegram.constants import ChatMemberStatus
@@ -2612,11 +2613,21 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
 
         keyboard = [[InlineKeyboardButton("Set your stakes", callback_data=f"game:setup:opponent:{game_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="You have accepted the challenge! Click the button below to set up your stake.",
-            reply_markup=reply_markup
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="You have accepted the challenge! Click the button below to set up your stake.",
+                reply_markup=reply_markup
+            )
+        except telegram.error.Forbidden:
+            opponent_member = await context.bot.get_chat_member(game['group_id'], user_id)
+            bot_username = context.bot.username
+            await context.bot.send_message(
+                chat_id=game['group_id'],
+                text=f'{opponent_member.user.mention_html()}, I can\'t send you a private message because you haven\'t started a chat with me. '
+                     f'Please <a href="https://t.me/{bot_username}">start a chat with me</a> and then click \'Accept\' on the challenge again.',
+                parse_mode='HTML'
+            )
 
     elif response_type == 'refuse':
         challenger_id = game['challenger_id']
@@ -2631,6 +2642,7 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
         )
 
         if challenger_stake['type'] == 'points':
+            await add_user_points(game['group_id'], challenger_id, -challenger_stake['value'], context)
             message = f"{challenger_name.capitalize()} is a loser for being refused! They lost {challenger_stake['value']} points."
             if 'fag' in challenger_name:
                 message = f"The {challenger_name} is a loser for being refused! They lost {challenger_stake['value']} points."
@@ -2643,12 +2655,12 @@ async def challenge_response_handler(update: Update, context: ContextTypes.DEFAU
             caption = f"{challenger_name.capitalize()} is a loser for being refused! This was their stake."
             if 'fag' in challenger_name:
                 caption = f"The {challenger_name} is a loser for being refused! This was their stake."
-            if loser_stake['type'] == 'photo':
-                await context.bot.send_photo(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
-            elif loser_stake['type'] == 'video':
-                await context.bot.send_video(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
-            elif loser_stake['type'] == 'voice':
-                await context.bot.send_voice(game['group_id'], loser_stake['value'], caption=caption, parse_mode='HTML')
+            if challenger_stake['type'] == 'photo':
+                await context.bot.send_photo(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
+            elif challenger_stake['type'] == 'video':
+                await context.bot.send_video(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
+            elif challenger_stake['type'] == 'voice':
+                await context.bot.send_voice(game['group_id'], challenger_stake['value'], caption=caption, parse_mode='HTML')
 
         del games_data[game_id]
         save_games_data(games_data)
