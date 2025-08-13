@@ -714,12 +714,12 @@ def generate_bs_board_text(board: list, show_ships: bool = True) -> str:
 
     map_values = {0: emojis['water'], 1: emojis['ship'] if show_ships else emojis['water'], 2: emojis['miss'], 3: emojis['hit']}
 
-    header = '`   A B C D E F G H I J`\n'
+    header = '   A B C D E F G H I J\n'
     board_text = header
     for r, row_data in enumerate(board):
         row_num = str(r + 1).rjust(2)
         row_str = ' '.join([map_values.get(cell, '🟦') for cell in row_data])
-        board_text += f"`{row_num} {row_str}`\n"
+        board_text += f"{row_num} {row_str}\n"
     return board_text
 
 async def bs_start_game_in_group(context: ContextTypes.DEFAULT_TYPE, game_id: str):
@@ -761,12 +761,12 @@ async def bs_send_turn_message(context: ContextTypes.DEFAULT_TYPE, game_id: str,
         [InlineKeyboardButton(chr(ord('A') + c), callback_data=f"bs:col:{game_id}:{c}") for c in range(5, 10)]
     ]
 
-    text = f"YOUR BOARD:\n{my_board_text}\nOPPONENT'S BOARD:\n{tracking_board_text}\nSelect a column to attack:"
+    text = f"<pre>YOUR BOARD:\n{my_board_text}\nOPPONENT'S BOARD:\n{tracking_board_text}</pre>\nSelect a column to attack:"
 
     if message_id and chat_id:
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=message_id, text=text,
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2'
+            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML'
         )
     else:
         await send_and_track_message(
@@ -775,7 +775,7 @@ async def bs_send_turn_message(context: ContextTypes.DEFAULT_TYPE, game_id: str,
             game_id,
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='MarkdownV2'
+            parse_mode='HTML'
         )
 
 async def bs_select_col_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -899,11 +899,12 @@ async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ship_to_place = context.user_data['bs_ships_to_place'][0]
     ship_size = BATTLESHIP_SHIPS[ship_to_place]
 
-    await query.edit_message_text(
-        f"Your board:\n{board_text}\n"
+    text = (
+        f"<pre>Your board:\n{board_text}\n"
         f"Place your {ship_to_place}: {ship_size} spaces.\n"
-        "Send coordinates in the format A1 H (for horizontal) or A1 V (for vertical)."
+        "Send coordinates in the format A1 H (for horizontal) or A1 V (for vertical).</pre>"
     )
+    await query.edit_message_text(text=text, parse_mode='HTML')
     return BS_AWAITING_PLACEMENT
 
 async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -963,7 +964,8 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
         game['placement_complete'][user_id] = True
         save_games_data(games_data)
 
-        await send_and_track_message(context, update.effective_chat.id, game_id, f"Final board:\n{board_text}\nAll ships placed! Waiting for opponent...", parse_mode='MarkdownV2')
+        text = f"<pre>Final board:\n{board_text}\nAll ships placed! Waiting for opponent...</pre>"
+        await send_and_track_message(context, update.effective_chat.id, game_id, text, parse_mode='HTML')
 
         opponent_id = str(game['opponent_id'] if user_id == str(game['challenger_id']) else game['challenger_id'])
         if game.get('placement_complete', {}).get(opponent_id):
@@ -973,12 +975,16 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         next_ship_name = context.user_data['bs_ships_to_place'][0]
         next_ship_size = BATTLESHIP_SHIPS[next_ship_name]
+        text = (
+            f"<pre>Your board:\n{board_text}\n"
+            f"Place your {next_ship_name}: {next_ship_size} spaces. Format: A1 H or A1 V.</pre>"
+        )
         await send_and_track_message(
             context,
             update.effective_chat.id,
             game_id,
-            f"Your board:\n{board_text}\n"
-            f"Place your {next_ship_name}: {next_ship_size} spaces. Format: A1 H or A1 V."
+            text,
+            parse_mode='HTML'
         )
         return BS_AWAITING_PLACEMENT
 
