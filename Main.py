@@ -714,7 +714,7 @@ def generate_bs_board_text(board: list, show_ships: bool = True) -> str:
 
     map_values = {0: emojis['water'], 1: emojis['ship'] if show_ships else emojis['water'], 2: emojis['miss'], 3: emojis['hit']}
 
-    header = '   A B C D E F G H I J\n'
+    header = '   ' + '  '.join('ABCDEFGHIJ') + '\n'
     board_text = header
     for r, row_data in enumerate(board):
         row_num = str(r + 1).rjust(2)
@@ -722,22 +722,53 @@ def generate_bs_board_text(board: list, show_ships: bool = True) -> str:
         board_text += f"{row_num} {row_str}\n"
     return board_text
 
+async def generate_public_bs_board_message(context: ContextTypes.DEFAULT_TYPE, game: dict) -> str:
+    """Generates the text for the public battleship board message."""
+    challenger_id = game['challenger_id']
+    opponent_id = game['opponent_id']
+
+    challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
+    opponent_member = await context.bot.get_chat_member(game['group_id'], opponent_id)
+
+    challenger_name = get_display_name(challenger_id, challenger_member.user.full_name)
+    opponent_name = get_display_name(opponent_id, opponent_member.user.full_name)
+
+    challenger_board_text = generate_bs_board_text(game['boards'][str(challenger_id)], show_ships=False)
+    opponent_board_text = generate_bs_board_text(game['boards'][str(opponent_id)], show_ships=False)
+
+    turn_player_id = game['turn']
+    turn_player_member = await context.bot.get_chat_member(game['group_id'], turn_player_id)
+    turn_player_name = get_display_name(turn_player_id, turn_player_member.user.full_name)
+
+    text = (
+        f"<b>Battleship!</b>\n\n"
+        f"<b>{challenger_name}'s Board:</b>\n"
+        f"<pre>{challenger_board_text}</pre>\n"
+        f"<b>{opponent_name}'s Board:</b>\n"
+        f"<pre>{opponent_board_text}</pre>\n"
+        f"It's {turn_player_name}'s turn to attack."
+    )
+    return text
+
 async def bs_start_game_in_group(context: ContextTypes.DEFAULT_TYPE, game_id: str):
     """Announces the start of the Battleship game in the group chat and prompts the first player."""
     games_data = load_games_data()
     game = games_data[game_id]
 
-    challenger_id = game['challenger_id']
-    challenger_member = await context.bot.get_chat_member(game['group_id'], challenger_id)
-    challenger_name = get_display_name(challenger_id, challenger_member.user.full_name)
-
-    await send_and_track_message(
-        context,
-        game['group_id'],
-        game_id,
-        f"All ships have been placed! The battle begins now.\n\nIt's {challenger_name}'s turn to attack. Check your private messages!",
+    # Generate and send the public board message
+    public_board_text = await generate_public_bs_board_message(context, game)
+    public_message = await context.bot.send_message(
+        chat_id=game['group_id'],
+        text=public_board_text,
         parse_mode='HTML'
     )
+
+    # Store the message ID
+    game['group_message_id'] = public_message.message_id
+    games_data[game_id] = game
+    save_games_data(games_data)
+
+    # Send the private turn message with attack buttons
     await bs_send_turn_message(context, game_id)
 
 def check_bs_ship_sunk(board: list, ship_coords: list) -> bool:
@@ -787,7 +818,9 @@ async def bs_select_col_handler(update: Update, context: ContextTypes.DEFAULT_TY
     c = int(c_str)
 
     # Keyboard to select a row to attack
-    keyboard = [[InlineKeyboardButton(str(r + 1), callback_data=f"bs:attack:{game_id}:{r}:{c}") for r in range(10)]]
+    row1 = [InlineKeyboardButton(str(i + 1), callback_data=f"bs:attack:{game_id}:{i}:{c}") for i in range(5)]
+    row2 = [InlineKeyboardButton(str(i + 1), callback_data=f"bs:attack:{game_id}:{i}:{c}") for i in range(5, 10)]
+    keyboard = [row1, row2]
 
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -846,14 +879,24 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     game['turn'] = int(opponent_id_str)
-    save_games_data(games_data)
+    save_games_data(games_data) # Save the new turn and board state
 
-    opponent_member = await context.bot.get_chat_member(game['group_id'], int(opponent_id_str))
-    opponent_name = get_display_name(int(opponent_id_str), opponent_member.user.full_name)
+    # Update the public board message
+    public_board_text = await generate_public_bs_board_message(context, game)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=game['group_id'],
+            message_id=game['group_message_id'],
+            text=public_board_text,
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit public battleship board for game {game_id}: {e}")
+
+    # Notify players privately
     attacker_name = get_display_name(int(user_id_str), query.from_user.full_name)
     coord_name = f"{chr(ord('A')+c)}{r+1}"
-
-    await query.edit_message_text(f"You fired at {coord_name}. {result_text}\n\nWaiting for {opponent_name} to move.", parse_mode='HTML')
+    await query.edit_message_text(f"You fired at {coord_name}. {result_text}\n\nYour turn is over. The board in the group has been updated.", parse_mode='HTML')
 
     try:
         await context.bot.send_message(
@@ -861,16 +904,9 @@ async def bs_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"{attacker_name} fired at {coord_name}. {result_text}"
         )
     except Exception as e:
-        print(f"Failed to send attack result to victim: {e}")
+        logger.warning(f"Failed to send attack result to victim: {e}")
 
-    await send_and_track_message(
-        context,
-        game['group_id'],
-        game_id,
-        f"It is now {opponent_name}'s turn.",
-        parse_mode='HTML'
-    )
-
+    # Send the next turn prompt
     await bs_send_turn_message(context, game_id)
 
 async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
