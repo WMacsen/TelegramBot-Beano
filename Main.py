@@ -901,8 +901,8 @@ async def bs_start_placement(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(
         f"Your board:\n{board_text}\n"
-        f"Place your {ship_to_place}: {ship_size} spaces.\n"
-        "Send coordinates in the format `A1 H` (for horizontal) or `A1 V` (for vertical).",
+        f"Place your {ship_to_place}: {ship_size} spaces\\.\n"
+        "Send coordinates in the format `A1 H` (for horizontal) or `A1 V` (for vertical)\\.",
         parse_mode='MarkdownV2'
     )
     return BS_AWAITING_PLACEMENT
@@ -979,7 +979,7 @@ async def bs_handle_placement(update: Update, context: ContextTypes.DEFAULT_TYPE
             update.effective_chat.id,
             game_id,
             f"Your board:\n{board_text}\n"
-            f"Place your {next_ship_name}: {next_ship_size} spaces\. Format: `A1 H` or `A1 V`\.",
+            f"Place your {next_ship_name}: {next_ship_size} spaces\\. Format: `A1 H` or `A1 V`\\.",
             parse_mode='MarkdownV2'
         )
         return BS_AWAITING_PLACEMENT
